@@ -13,8 +13,8 @@ setup(
     ],
     install_requires=['setuptools'],
     zip_safe=True,
-    maintainer='rokey',
-    maintainer_email='rokey@todo.todo',
+    maintainer='k-chan-l',
+    maintainer_email='kings0625@naver.com',
     description='TODO: Package description',
     license='TODO: License declaration',
     extras_require={
@@ -24,7 +24,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'main_node = dishwashing_robot.main_node:main'
+            'main_node = dishwashing_robot.main_node:main',
+            'plate_test = dishwashing_robot.nodes.plate_test_node:main',
         ],
     },
 )
