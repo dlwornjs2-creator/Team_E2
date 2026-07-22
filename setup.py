@@ -25,7 +25,8 @@ setup(
     entry_points={
         'console_scripts': [
             'main_node = dishwashing_robot.main_node:main',
-            'plate_test = dishwashing_robot.nodes.plate_test_node:main',
+            'plate_test = nodes.plate_test_node:main',
+            
         ],
     },
 )
