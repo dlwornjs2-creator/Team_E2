@@ -28,6 +28,8 @@ from .waypoints import (
     PLATE_PLACE_APPROACH, PLATE_PLACE_APPROACH_J,
     DISH1_VIA_J, DISH1_WASH_START_J,
     DISH2_VIA_J, DISH2_WASH_START_J,
+    ROTATE_RELEASE_SAFE_J, ROTATE_RELEASE_J,
+    ROTATE_GRAB_SAFE_J, ROTATE_GRAB_J,
 )
 
 
@@ -245,18 +247,31 @@ class PlateController:
               ref=coord, mod=DR_MV_MOD_ABS)
         self._log.info("Wash arcs done")
 
-    def wash_face(self, coord, via_j, start_j, start_angle, label=""):
-        """경유점 경유 -> 세척 시작점 -> 동심 반원 세척 -> 경유점 이탈"""
+    def wash_face(self, coord, via_j, start_j, start_angle, label="",
+                  skip_wash=False):
+        """경유점 경유 -> 세척 시작점 -> 동심 반원 세척 -> 경유점 이탈
+
+        skip_wash=True 면 세척 동작(wash_arcs)만 건너뛰고 이동 경로는
+        그대로 탄다. 경로 검증용.
+        """
         self._log.info(f"--- Wash face: {label} (coord={coord}) ---")
 
         self.move_to_wash_start(via_j, start_j, label)
-        self.wash_arcs(coord, start_angle=start_angle)
+
+        if skip_wash:
+            self._log.info("  (wash skipped)")
+        else:
+            self.wash_arcs(coord, start_angle=start_angle)
+
         self.leave_wash_area(via_j, label)
 
         self._log.info(f"--- Wash face: {label} done ---")
 
-    def wash_plate(self):
+    def wash_plate(self, skip_wash=False):
         """양면 세척: dish1(앞면) -> dish2(뒷면)
+
+        skip_wash=True 면 세척 동작만 건너뛰고 두 면의 이동 경로는
+        그대로 탄다.
 
         주의: dish1 계열은 sol 2, dish2 는 sol 7 이라 두 면 사이를
               이동할 때 J1 이 크게 회전한다. 경로 확인 필요.
@@ -264,11 +279,50 @@ class PlateController:
         self._log.info("===== Wash plate: start =====")
 
         self.wash_face(cfg.DISH1_COORD, DISH1_VIA_J, DISH1_WASH_START_J,
-                       cfg.DISH1_START_ANGLE, "dish1 (front)")
+                       cfg.DISH1_START_ANGLE, "dish1 (front)",
+                       skip_wash=skip_wash)
         self.wash_face(cfg.DISH2_COORD, DISH2_VIA_J, DISH2_WASH_START_J,
-                       cfg.DISH2_START_ANGLE, "dish2 (back)")
+                       cfg.DISH2_START_ANGLE, "dish2 (back)",
+                       skip_wash=skip_wash)
 
         self._log.info("===== Wash plate: done =====")
+
+    # ================= 접시 회전 (재파지) =================
+    def rotate_plate_once(self):
+        """접시 파지 위치를 rim 을 따라 한 칸(약 60도) 옮긴다.
+
+        릴리즈 안전 -> 릴리즈 구역 -> open -> 릴리즈 안전
+          -> 그랩 안전 -> 그랩 구역 -> close -> 그랩 안전
+        """
+        vel, acc = cfg.ROTATE_VEL_J, cfg.ROTATE_ACC_J
+
+        # 접시 내려놓기
+        self._log.info("  release side")
+        movej(ROTATE_RELEASE_SAFE_J, vel=vel, acc=acc)
+        movej(ROTATE_RELEASE_J, vel=vel, acc=acc)
+        self.gripper.open()
+        movej(ROTATE_RELEASE_SAFE_J, vel=vel, acc=acc)
+
+        # 옮긴 위치에서 다시 잡기
+        self._log.info("  grab side")
+        movej(ROTATE_GRAB_SAFE_J, vel=vel, acc=acc)
+        movej(ROTATE_GRAB_J, vel=vel, acc=acc)
+        self.gripper.close()
+        movej(ROTATE_GRAB_SAFE_J, vel=vel, acc=acc)
+
+    def rotate_plate(self, steps=None):
+        """rotate_plate_once 를 steps 회 반복해 접시를 돌린다.
+
+        기본값 3회 = 반바퀴.
+        """
+        steps = cfg.ROTATE_STEPS if steps is None else steps
+        self._log.info(f"Rotate plate: {steps} step(s)")
+
+        for i in range(steps):
+            self._log.info(f"[rotate {i + 1}/{steps}]")
+            self.rotate_plate_once()
+
+        self._log.info("Rotate plate: done")
 
     # ================= Step 4: 접시 배치 =================
     def place_plate(self, via_j=None):
@@ -303,8 +357,11 @@ class PlateController:
         self._log.info("Place plate: done")
 
     # ================= 전체 시나리오 =================
-    def run_plate_task(self):
-        """Pick -> Weight -> (Disposal) -> Wash -> Place -> Home"""
+    def run_plate_task(self, skip_wash=False):
+        """Pick -> Weight -> (Disposal) -> Wash -> Place -> Home
+
+        skip_wash=True 면 세척 동작만 건너뛰고 전체 경로는 그대로 탄다.
+        """
         self._log.info("########## Plate task: START ##########")
 
         self.move_home()
@@ -314,7 +371,7 @@ class PlateController:
         if self.is_abnormal_weight(weight):
             self.request_content_disposal()
 
-        self.wash_plate()
+        self.wash_plate(skip_wash=skip_wash)
         self.place_plate()
         self.move_home()
 
