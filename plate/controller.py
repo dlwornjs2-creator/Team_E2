@@ -24,6 +24,7 @@ from DR_common2 import posx
 
 from . import config as cfg
 from .gripper import Gripper
+from . import food_check
 from .waypoints import (
     HOME, PLATE_PICK, PLATE_PLACE, PLATE_PLACE_J,
     PLATE_PLACE_APPROACH, PLATE_PLACE_APPROACH_J,
@@ -120,28 +121,19 @@ class PlateController:
         self._log.info(f"Pick plate: done, pos={[round(v, 1) for v in cur]}, "
                        f"sol={sol}")
 
-    # ================= Step 2: 무게 확인 =================
+    # ================= Step 2: 음식물 확인 / 배출 =================
     def check_plate_weight(self):
-        """접시 무게 측정.
+        """툴 Fz 를 평균 내어 음식물 유무를 판정한다. -> (food_exists, fz)"""
+        return food_check.check_food(self._log)
 
-        TODO: 측정 방식 미확정 (로봇 Force/Torque, 외부 Load Cell,
-              외부 모듈에서 결과만 수신). 방식이 정해져도 이 함수만
-              교체하면 되도록 분리해 둔다.
-        """
-        self._log.info("Check weight: (not implemented, assume normal)")
-        return 0.0
-
-    def is_abnormal_weight(self, weight):
-        """TODO: EMPTY_PLATE_WEIGHT / WEIGHT_THRESHOLD 확정 후 구현"""
-        return False
+    def is_abnormal_weight(self, result):
+        """check_plate_weight 결과에서 음식물 유무만 꺼낸다."""
+        food_exists, _fz = result
+        return food_exists
 
     def request_content_disposal(self):
-        """내용물 제거 요청.
-
-        TODO: 다른 팀원 담당 기능과 연동. 현재는 음식물이 이미
-              제거된 것으로 가정하고 통과한다.
-        """
-        self._log.info("Content disposal: skipped (assumed already empty)")
+        """음식물 배출(털기) 동작. 팀원 코드 기반."""
+        food_check.dispose_food(self._log)
 
     # ================= Step 3: 세척 =================
     def move_to_wash_start(self, via_j, start_j, label=""):
@@ -284,7 +276,7 @@ class PlateController:
         self._log.info("Wash arcs done")
 
     def wash_face(self, approach_j, start_j, start_angle,
-                  force_sign, coord=None, label=""):
+                  force_sign, coord=None, label="", skip_approach=False):
         """접근점 경유 -> 세척 시작점 -> 동심 반원 세척 -> 접근점 이탈
 
         좌표계는 dish1(101) 하나만 사용한다. 세척 위치가 달라도 좌표계
@@ -293,8 +285,11 @@ class PlateController:
         coord = cfg.DISH1_COORD if coord is None else coord
         self._log.info(f"--- Wash: {label} (coord={coord}) ---")
 
-        self._log.info("  -> approach")
-        movej(approach_j, vel=cfg.VEL_J, acc=cfg.ACC_J)
+        if skip_approach:
+            self._log.info("  -> approach (skipped, already in position)")
+        else:
+            self._log.info("  -> approach")
+            movej(approach_j, vel=cfg.VEL_J, acc=cfg.ACC_J)
 
         self._log.info("  -> wash start")
         movej(start_j, vel=cfg.VEL_J_SLOW, acc=cfg.ACC_J_SLOW)
@@ -307,13 +302,18 @@ class PlateController:
 
         self._log.info(f"--- Wash: {label} done ---")
 
-    def wash_plate(self):
-        """세척 위치 1 -> 세척 위치 2 순으로 세척한다."""
+    def wash_plate(self, skip_first_approach=False):
+        """세척 위치 1 -> 세척 위치 2 순으로 세척한다.
+
+        skip_first_approach=True 면 위치 1 의 접근 이동을 건너뛴다.
+        (food_check 의 5단계가 이미 접근점으로 옮겨놓은 경우)
+        """
         self._log.info("===== Wash plate: start =====")
 
         self.wash_face(WASH1_APPROACH_J, WASH1_START_J,
                        cfg.WASH1_START_ANGLE, cfg.WASH1_FORCE_SIGN,
-                       label="wash pos 1")
+                       label="wash pos 1",
+                       skip_approach=skip_first_approach)
         self.wash_face(WASH2_APPROACH_J, WASH2_START_J,
                        cfg.WASH2_START_ANGLE, cfg.WASH2_FORCE_SIGN,
                        label="wash pos 2")
@@ -391,8 +391,10 @@ class PlateController:
 
     # ================= 전체 시나리오 =================
     def run_plate_task(self, rotate=True):
-        """Pick -> Weight -> (Disposal) -> Wash -> (Rotate -> Wash) -> Place -> Home
+        """Pick -> 음식물 확인/배출 -> Wash -> (Rotate -> Wash) -> Place -> Home
 
+        음식물 확인/배출과 그 뒤 '다음 작업 위치' 이동은 food_check 모듈이
+        담당하며, 그 이동이 세척 위치 1 접근을 대신한다.
         rotate=True 면 세척 후 파지를 옮겨(rotate_plate) 그리퍼가 가렸던
         영역을 한 번 더 세척한다.
         """
@@ -401,11 +403,11 @@ class PlateController:
         self.move_home()
         self.pick_plate()
 
-        weight = self.check_plate_weight()
-        if self.is_abnormal_weight(weight):
-            self.request_content_disposal()
+        # 음식물 확인 -> (있으면) 배출 -> 세척 위치 1 접근점으로 이동
+        # 이 이동이 세척 접근을 대신하므로 첫 세척은 접근을 건너뛴다.
+        food_check.run_food_check(self._log)
 
-        self.wash_plate()
+        self.wash_plate(skip_first_approach=True)
 
         if rotate:
             self.rotate_plate()
