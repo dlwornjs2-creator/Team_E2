@@ -14,10 +14,11 @@ from DSR_ROBOT2 import (
     set_tool, set_tcp, get_tool, get_tcp, get_current_posx,
     movej, movel, movec,
     set_velj, set_accj, set_velx, set_accx,
-    set_ref_coord,
+    set_ref_coord, wait,
     task_compliance_ctrl, set_stiffnessx, set_desired_force,
-    release_force, release_compliance_ctrl,
-    DR_BASE, DR_MV_MOD_ABS, DR_MV_MOD_REL, DR_FC_MOD_ABS,
+    release_force, release_compliance_ctrl, check_force_condition,
+    DR_BASE, DR_TOOL, DR_AXIS_X, DR_AXIS_Y, DR_AXIS_Z,
+    DR_MV_MOD_ABS, DR_MV_MOD_REL, DR_FC_MOD_ABS,
 )
 from DR_common2 import posx
 
@@ -26,8 +27,9 @@ from .gripper import Gripper
 from .waypoints import (
     HOME, PLATE_PICK, PLATE_PLACE, PLATE_PLACE_J,
     PLATE_PLACE_APPROACH, PLATE_PLACE_APPROACH_J,
-    DISH1_VIA_J, DISH1_WASH_START_J,
-    DISH2_VIA_J, DISH2_WASH_START_J,
+    PLACE_VIA, PLACE_VIA_J,
+    WASH1_APPROACH_J, WASH1_START_J,
+    WASH2_APPROACH_J, WASH2_START_J,
     ROTATE_RELEASE_SAFE_J, ROTATE_RELEASE_J,
     ROTATE_GRAB_SAFE_J, ROTATE_GRAB_J,
 )
@@ -160,23 +162,55 @@ class PlateController:
         self._log.info(f"Leave wash area: {label}")
         movej(via_j, vel=cfg.VEL_J_SLOW, acc=cfg.ACC_J_SLOW)
 
-    def _force_on(self, coord):
-        """유저 좌표계 Z(수세미 방향)로 일정 힘을 유지하도록 순응 제어 시작.
+    # 툴 좌표계 축 인덱스 -> DR_AXIS_* 상수
+    _AXIS_CONST = (DR_AXIS_X, DR_AXIS_Y, DR_AXIS_Z)
+
+    def _force_on(self, force_sign):
+        """순응 제어 시작 + 접근용 강한 힘 지령 (툴 좌표계 기준).
 
         힘제어 함수(task_compliance_ctrl / set_stiffnessx /
         set_desired_force)는 ref 인자를 받지 않고 전역 기준 좌표계를
-        따르므로, set_ref_coord 로 먼저 좌표계를 지정한다.
-        힘 부호는 양수 (+Z 가 수세미 방향).
-        """
-        ret = set_ref_coord(coord)
-        self._log.info(f"set_ref_coord({coord}) -> {ret}")
+        따르므로 set_ref_coord(DR_TOOL) 로 먼저 지정한다.
 
-        task_compliance_ctrl()
-        set_stiffnessx(cfg.WASH_STIFFNESS, time=0.0)
-        set_desired_force([0.0, 0.0, cfg.TARGET_FORCE, 0.0, 0.0, 0.0],
-                          [0, 0, 1, 0, 0, 0],
-                          time=0.0, mod=DR_FC_MOD_ABS)
-        self._log.info(f"Force control ON ({cfg.TARGET_FORCE}N, coord={coord})")
+        실측상 툴 X축이 접시 법선이며, 세척 위치에 따라 접시가 반대로
+        향하므로 force_sign 으로 방향을 지정한다(위치1 -1, 위치2 +1).
+        반원 경로는 유저 좌표계(dish1) 기준 그대로다.
+        """
+        ret = set_ref_coord(DR_TOOL)
+
+        fd = [0.0] * 6
+        dr = [0] * 6
+        fd[cfg.FORCE_AXIS] = force_sign * cfg.APPROACH_FORCE
+        dr[cfg.FORCE_AXIS] = 1
+
+        r1 = task_compliance_ctrl()
+        r2 = set_stiffnessx(cfg.WASH_STIFFNESS, time=0.0)
+        r3 = set_desired_force(fd, dr, time=0.0, mod=DR_FC_MOD_ABS)
+
+        self._log.info(f"ref_coord(TOOL)={ret}, compliance={r1}, "
+                       f"stiffness={r2}, force={r3} "
+                       f"(approach {fd[cfg.FORCE_AXIS]}N on "
+                       f"tool axis {cfg.FORCE_AXIS})")
+
+    def _wait_contact_then_release_force(self):
+        """접촉이 감지될 때까지 기다린 뒤 힘 지령만 해제한다.
+
+        release_force() 는 힘 지령만 풀고 순응 제어는 유지하므로,
+        접시가 수세미에 닿은 상태에서 부드럽게 세척할 수 있다.
+        """
+        deadline = int(cfg.CONTACT_TIMEOUT / 0.1)
+        for _ in range(deadline):
+            if check_force_condition(self._AXIS_CONST[cfg.FORCE_AXIS],
+                                     min=cfg.CONTACT_FORCE,
+                                     ref=DR_TOOL) == 0:
+                self._log.info("  contact detected -> release force")
+                break
+            wait(0.1)
+        else:
+            self._log.warn(f"  no contact within {cfg.CONTACT_TIMEOUT}s "
+                           "-> release force anyway")
+
+        release_force(time=0.0)   # 순응 제어는 유지
 
     def _force_off(self):
         """힘/순응 제어 해제 후 기준 좌표계를 base 로 복원."""
@@ -190,7 +224,7 @@ class PlateController:
             set_ref_coord(DR_BASE)
 
     def wash_arcs(self, coord, radii=None, passes=None,
-                  start_angle=0.0, z_offset=0.0):
+                  start_angle=0.0, z_offset=0.0, force_sign=None):
         """현재 위치를 중심으로 하는 동심 반원들을 movec 으로 왕복 세척.
 
         현재 위치(= 좌표계 원점, 접시 중심)를 중심으로 각 반지름마다
@@ -215,7 +249,9 @@ class PlateController:
                        f"passes={passes}, start_angle={start_angle}")
 
         if cfg.USE_FORCE_CONTROL:
-            self._force_on(coord)
+            sign = cfg.WASH1_FORCE_SIGN if force_sign is None else force_sign
+            self._force_on(sign)                       # 강한 힘으로 접근
+            self._wait_contact_then_release_force()    # 닿으면 힘만 해제
 
         try:
             for r in radii:
@@ -247,43 +283,40 @@ class PlateController:
               ref=coord, mod=DR_MV_MOD_ABS)
         self._log.info("Wash arcs done")
 
-    def wash_face(self, coord, via_j, start_j, start_angle, label="",
-                  skip_wash=False):
-        """경유점 경유 -> 세척 시작점 -> 동심 반원 세척 -> 경유점 이탈
+    def wash_face(self, approach_j, start_j, start_angle,
+                  force_sign, coord=None, label=""):
+        """접근점 경유 -> 세척 시작점 -> 동심 반원 세척 -> 접근점 이탈
 
-        skip_wash=True 면 세척 동작(wash_arcs)만 건너뛰고 이동 경로는
-        그대로 탄다. 경로 검증용.
+        좌표계는 dish1(101) 하나만 사용한다. 세척 위치가 달라도 좌표계
+        원점(접시 중심 = 수세미 접촉점)은 같으므로 반원 경로는 동일하다.
         """
-        self._log.info(f"--- Wash face: {label} (coord={coord}) ---")
+        coord = cfg.DISH1_COORD if coord is None else coord
+        self._log.info(f"--- Wash: {label} (coord={coord}) ---")
 
-        self.move_to_wash_start(via_j, start_j, label)
+        self._log.info("  -> approach")
+        movej(approach_j, vel=cfg.VEL_J, acc=cfg.ACC_J)
 
-        if skip_wash:
-            self._log.info("  (wash skipped)")
-        else:
-            self.wash_arcs(coord, start_angle=start_angle)
+        self._log.info("  -> wash start")
+        movej(start_j, vel=cfg.VEL_J_SLOW, acc=cfg.ACC_J_SLOW)
 
-        self.leave_wash_area(via_j, label)
+        self.wash_arcs(coord, start_angle=start_angle,
+                       force_sign=force_sign)
 
-        self._log.info(f"--- Wash face: {label} done ---")
+        self._log.info("  -> leave")
+        movej(approach_j, vel=cfg.VEL_J_SLOW, acc=cfg.ACC_J_SLOW)
 
-    def wash_plate(self, skip_wash=False):
-        """양면 세척: dish1(앞면) -> dish2(뒷면)
+        self._log.info(f"--- Wash: {label} done ---")
 
-        skip_wash=True 면 세척 동작만 건너뛰고 두 면의 이동 경로는
-        그대로 탄다.
-
-        주의: dish1 계열은 sol 2, dish2 는 sol 7 이라 두 면 사이를
-              이동할 때 J1 이 크게 회전한다. 경로 확인 필요.
-        """
+    def wash_plate(self):
+        """세척 위치 1 -> 세척 위치 2 순으로 세척한다."""
         self._log.info("===== Wash plate: start =====")
 
-        self.wash_face(cfg.DISH1_COORD, DISH1_VIA_J, DISH1_WASH_START_J,
-                       cfg.DISH1_START_ANGLE, "dish1 (front)",
-                       skip_wash=skip_wash)
-        self.wash_face(cfg.DISH2_COORD, DISH2_VIA_J, DISH2_WASH_START_J,
-                       cfg.DISH2_START_ANGLE, "dish2 (back)",
-                       skip_wash=skip_wash)
+        self.wash_face(WASH1_APPROACH_J, WASH1_START_J,
+                       cfg.WASH1_START_ANGLE, cfg.WASH1_FORCE_SIGN,
+                       label="wash pos 1")
+        self.wash_face(WASH2_APPROACH_J, WASH2_START_J,
+                       cfg.WASH2_START_ANGLE, cfg.WASH2_FORCE_SIGN,
+                       label="wash pos 2")
 
         self._log.info("===== Wash plate: done =====")
 
@@ -333,8 +366,8 @@ class PlateController:
         """
         self._log.info("Place plate: start")
 
-        # 1) 경유점으로 이동
-        via_j = DISH2_VIA_J if via_j is None else via_j
+        # 1) 경유점으로 이동 (배치 전용 안전 자세)
+        via_j = PLACE_VIA_J if via_j is None else via_j
         self._log.info("  [1] move to via point")
         movej(via_j, vel=cfg.VEL_J, acc=cfg.ACC_J)
 
@@ -357,10 +390,11 @@ class PlateController:
         self._log.info("Place plate: done")
 
     # ================= 전체 시나리오 =================
-    def run_plate_task(self, skip_wash=False):
-        """Pick -> Weight -> (Disposal) -> Wash -> Place -> Home
+    def run_plate_task(self, rotate=True):
+        """Pick -> Weight -> (Disposal) -> Wash -> (Rotate -> Wash) -> Place -> Home
 
-        skip_wash=True 면 세척 동작만 건너뛰고 전체 경로는 그대로 탄다.
+        rotate=True 면 세척 후 파지를 옮겨(rotate_plate) 그리퍼가 가렸던
+        영역을 한 번 더 세척한다.
         """
         self._log.info("########## Plate task: START ##########")
 
@@ -371,13 +405,36 @@ class PlateController:
         if self.is_abnormal_weight(weight):
             self.request_content_disposal()
 
-        self.wash_plate(skip_wash=skip_wash)
+        self.wash_plate()
+
+        if rotate:
+            self.rotate_plate()
+            self.wash_plate()
+
         self.place_plate()
         self.move_home()
 
         self._log.info("########## Plate task: COMPLETE ##########")
 
     # ================= 테스트 유틸 =================
+    def probe_tool_axis(self, axis="x", amp=10.0):
+        """툴 좌표계 축 방향으로 왕복. 어느 축이 접시 법선인지 확인용.
+
+        get_current_posx 는 ref=DR_TOOL 을 받지 않으므로(Invalid value : ref(1))
+        상대 이동(MOD_REL)만 사용한다.
+        """
+        idx = {"x": 0, "y": 1, "z": 2}[axis]
+        d = [0.0] * 6
+        d[idx] = amp
+
+        self._log.info(f"Probe tool {axis}: +{amp}mm")
+        movel(posx(*d), vel=10, acc=10, ref=DR_TOOL, mod=DR_MV_MOD_REL)
+        wait(1.0)
+
+        d[idx] = -amp
+        self._log.info(f"Probe tool {axis}: back")
+        movel(posx(*d), vel=10, acc=10, ref=DR_TOOL, mod=DR_MV_MOD_REL)
+
     def shake_in_coord(self, coord, amp=20.0, times=4, axis="x"):
         """좌표계 축 방향 왕복. 좌표계 방향 확인용."""
         self._log.info(f"Shake in coord {coord}: {axis}axis +-{amp}mm x{times}")

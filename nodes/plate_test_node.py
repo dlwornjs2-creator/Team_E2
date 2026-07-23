@@ -21,10 +21,11 @@ def main(args=None):
     DR_init.__dsr__node = node
 
     # DSR 노드 등록 후에 import 해야 서비스 클라이언트가 정상 생성된다
+    from DSR_ROBOT2 import movej
     from plate.controller import PlateController
     from plate.waypoints import (
-        DISH1_VIA_J, DISH1_WASH_START_J,
-        DISH2_VIA_J, DISH2_WASH_START_J,
+        WASH1_APPROACH_J, WASH1_START_J,
+        WASH2_APPROACH_J, WASH2_START_J,
     )
 
     controller = PlateController(node)
@@ -34,34 +35,35 @@ def main(args=None):
             return
 
         # ---------------------------------------------------------------
-        # [1] 접시 회전(재파지)만 테스트   <- 현재 활성화
-        #     릴리즈 안전 -> 릴리즈 -> open -> 릴리즈 안전
-        #       -> 그랩 안전 -> 그랩 -> close -> 그랩 안전
-        #     1회 = 약 60도. 처음에는 steps=1 로 한 칸만 확인할 것.
+        # [1] 전과정   <- 현재 활성화
+        #     Pick -> Wash(위치1,2) -> Rotate -> Wash(위치1,2)
+        #       -> Place -> Home
         # ---------------------------------------------------------------
-
-        # 한 칸이 확인되면 반바퀴(3회)로:
-        # controller.rotate_plate()          # config.ROTATE_STEPS = 3
+        controller.run_plate_task()
 
         # ---------------------------------------------------------------
-        # [2] 파지 -> 회전 -> 배치
+        # [2] 전과정 (회전 없이 1회 세척만)
         # ---------------------------------------------------------------
-        controller.move_home()
-        controller.pick_plate()
-        controller.rotate_plate()
-        # controller.place_plate()
+        # controller.run_plate_task(rotate=False)
 
         # ---------------------------------------------------------------
-        # [3] 전과정 (세척 포함)
+        # [3] 세척 위치 1 만
         # ---------------------------------------------------------------
-        # controller.run_plate_task()
+        # controller.wash_face(WASH1_APPROACH_J, WASH1_START_J,
+        #                      cfg.WASH1_START_ANGLE, cfg.WASH1_FORCE_SIGN,
+        #                      label="wash pos 1")
 
         # ---------------------------------------------------------------
-        # [4] dish1 세척만 (수세미 교체로 좌표 재티칭 필요)
+        # [4] 세척 위치 2 만
         # ---------------------------------------------------------------
-        # controller.wash_face(cfg.DISH1_COORD, DISH1_VIA_J,
-        #                      DISH1_WASH_START_J, cfg.DISH1_START_ANGLE,
-        #                      "dish1 (front)")
+        # controller.wash_face(WASH2_APPROACH_J, WASH2_START_J,
+        #                      cfg.WASH2_START_ANGLE, cfg.WASH2_FORCE_SIGN,
+        #                      label="wash pos 2")
+
+        # ---------------------------------------------------------------
+        # [5] 접시 회전(재파지)
+        # ---------------------------------------------------------------
+        # controller.rotate_plate(steps=1)
 
     except KeyboardInterrupt:
         node.get_logger().info("Stopped by user")
