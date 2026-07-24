@@ -26,6 +26,7 @@ def main(args=None):
     from plate.waypoints import (
         WASH1_APPROACH_J, WASH1_START_J,
         WASH2_APPROACH_J, WASH2_START_J,
+        PLACE_VIA_J,
     )
 
     controller = PlateController(node)
@@ -35,39 +36,54 @@ def main(args=None):
             return
 
         # ---------------------------------------------------------------
-        # [1] 전과정   <- 현재 활성화
-        #     Pick -> Wash(위치1,2) -> Rotate -> Wash(위치1,2)
-        #       -> Place -> Home
+        # [1] 파지 -> 회전 -> 배치 경유점까지만   <- 현재 활성화
+        #     여기서 멈추므로 펜던트로 새 배치 좌표를 따면 된다.
+        #     (기존 배치 좌표에서 걸려서 재티칭이 필요한 상태)
+        # ---------------------------------------------------------------
+        # controller.move_home()
+        # controller.pick_plate()
+        # controller.rotate_plate()
+
+        # # 배치 경유점까지만 이동하고 정지
+        # node.get_logger().info("-> place via point")
+        # movej(PLACE_VIA_J, vel=cfg.VEL_J, acc=cfg.ACC_J)
+
+        # node.get_logger().info(
+        #     "===== 여기서 정지. 펜던트로 배치 좌표를 따세요. ====="
+        #     )
+        # node.get_logger().info(
+        #     "  (그리퍼가 접시를 잡고 있는 상태로 유지됩니다)")
+
+        # ---------------------------------------------------------------
+        # [2] 위와 같되 기존 배치 자세까지 이동 (충돌 확인용)
+        # ---------------------------------------------------------------
+        # controller.move_home()
+        # controller.pick_plate()
+        # controller.rotate_plate()
+        # controller.place_plate()
+        # controller.move_home()
+
+        # ---------------------------------------------------------------
+        # [3] 전과정
         # ---------------------------------------------------------------
         controller.run_plate_task()
 
         # ---------------------------------------------------------------
-        # [2] 전과정 (회전 없이 1회 세척만)
-        # ---------------------------------------------------------------
-        # controller.run_plate_task(rotate=False)
-
-        # ---------------------------------------------------------------
-        # [3] 세척 위치 1 만
+        # [4] 세척 위치 1 (앞면, 원호) 만
         # ---------------------------------------------------------------
         # controller.wash_face(WASH1_APPROACH_J, WASH1_START_J,
         #                      cfg.WASH1_START_ANGLE, cfg.WASH1_FORCE_SIGN,
-        #                      label="wash pos 1")
+        #                      label="wash pos 1", sweep=False)
 
         # ---------------------------------------------------------------
-        # [4] 세척 위치 2 만
+        # [5] 세척 위치 2 (뒷면, 직선 쓸기) 만
         # ---------------------------------------------------------------
         # controller.wash_face(WASH2_APPROACH_J, WASH2_START_J,
         #                      cfg.WASH2_START_ANGLE, cfg.WASH2_FORCE_SIGN,
-        #                      label="wash pos 2")
+        #                      label="wash pos 2", sweep=True)
 
         # ---------------------------------------------------------------
-        # [5] 음식물 확인 / 배출만 테스트
-        # ---------------------------------------------------------------
-        # from plate import food_check
-        # food_check.run_food_check(node.get_logger())
-
-        # ---------------------------------------------------------------
-        # [6] 접시 회전(재파지)
+        # [6] 접시 회전(재파지)만
         # ---------------------------------------------------------------
         # controller.rotate_plate(steps=1)
 
