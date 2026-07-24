@@ -12,15 +12,21 @@ import math
 
 from DSR_ROBOT2 import (
     set_tool, set_tcp, get_tool, get_tcp, get_current_posx,
-    movej, movel, movec,
     set_velj, set_accj, set_velx, set_accx,
     set_ref_coord, wait,
+    check_motion, mwait, get_tool_force,
     task_compliance_ctrl, set_stiffnessx, set_desired_force,
     release_force, release_compliance_ctrl, check_force_condition,
     DR_BASE, DR_TOOL, DR_AXIS_X, DR_AXIS_Y, DR_AXIS_Z,
-    DR_MV_MOD_ABS, DR_MV_MOD_REL, DR_FC_MOD_ABS,
+    DR_MV_MOD_ABS, DR_MV_MOD_REL, DR_FC_MOD_ABS, DR_QSTOP,
 )
 from DR_common2 import posx
+from dsr_msgs2.srv import MoveStop
+
+# 모션 함수는 정지 가드를 거친 버전을 쓴다. 호출 지점은 그대로 두고
+# import 만 바꾸면 모든 movej/movel/movec 이 abort 플래그를 확인한다.
+from . import motion_guard
+from .motion_guard import movej, movel, movec, amovel, PlateAborted
 
 from . import config as cfg
 from .gripper import Gripper
@@ -36,13 +42,63 @@ from .waypoints import (
 )
 
 
+# PlateAborted 는 motion_guard 에서 정의하고 여기서 재노출한다.
+# (main_node 의 `from plate.controller import PlateAborted` 호환 유지)
+
+
 class PlateController:
     """접시 파지 -> 무게확인 -> 세척 -> 배치 담당."""
 
-    def __init__(self, node):
+    def __init__(self, node, on_step=None):
         self.node = node
         self.gripper = Gripper(node)
         self._log = node.get_logger()
+
+        # 진행 단계를 바깥(메인 노드)에 알리는 콜백.
+        # 컨트롤러는 ROS 통신을 모르고 숫자만 넘긴다.
+        self._on_step = on_step
+
+        # 긴급정지 플래그는 motion_guard 가 전역으로 관리한다.
+        # (모든 movej/movel/movec 호출이 플래그를 자동 확인)
+
+        # 이 배포판에는 stop() 함수가 없어 motion/move_stop 서비스를
+        # 직접 호출한다(기어 프로젝트에서 검증된 방식).
+        self._stop_cli = node.create_client(MoveStop, "motion/move_stop")
+
+    def stop_motion(self, st_mode=DR_QSTOP):
+        """진행 중인 모션을 정지시킨다."""
+        req = MoveStop.Request()
+        req.stop_mode = st_mode
+        self._stop_cli.call_async(req)
+
+    # ================= 진행 상황 / 중단 =================
+    def _step(self, n):
+        """진행 단계를 바깥에 알린다(콜백이 없으면 아무것도 안 함)."""
+        if self._on_step is not None:
+            self._on_step(n)
+
+    def request_abort(self):
+        """긴급정지 요청. 진행 중인 모션을 끊고 이후 모션을 막는다.
+
+        stop_motion 은 call_async(응답 대기 없음)라 어느 스레드에서
+        불러도 executor 와 충돌하지 않는다. 플래그를 먼저 세워
+        끊긴 모션이 반환되는 즉시 가드가 PlateAborted 를 던지게 한다.
+        """
+        motion_guard.set_abort()
+        self._log.warn("Abort requested")
+        self.stop_motion()
+
+    def clear_abort(self):
+        """중단 플래그 해제. 다음 작업 시작 전에 부른다."""
+        motion_guard.clear_abort()
+
+    @property
+    def aborted(self):
+        return motion_guard.is_aborted()
+
+    def _check_abort(self):
+        """중단 요청이 있으면 예외를 던져 작업을 끊는다."""
+        motion_guard.check_abort()
 
     # ================= 초기화 =================
     def setup(self):
@@ -94,7 +150,7 @@ class PlateController:
 
     # ================= Step 1: 접시 파지 =================
     def pick_plate(self):
-        """APPROACH -> PICK -> 파지 -> 수직 RETREAT
+        """[1단계] APPROACH -> PICK -> 파지 -> 수직 RETREAT
 
         이 배포판의 movej 는 posx 를 받지 않으므로(Invalid type : pos)
         posx 로 이동할 때는 movel 을 쓴다.
@@ -157,8 +213,11 @@ class PlateController:
     # 툴 좌표계 축 인덱스 -> DR_AXIS_* 상수
     _AXIS_CONST = (DR_AXIS_X, DR_AXIS_Y, DR_AXIS_Z)
 
-    def _force_on(self, force_sign):
-        """순응 제어 시작 + 접근용 강한 힘 지령 (툴 좌표계 기준).
+    def _force_on(self, force_sign, magnitude=None):
+        """순응 제어 시작 + 힘 지령 (툴 좌표계 기준).
+
+        magnitude 를 주지 않으면 접근용 강한 힘(APPROACH_FORCE)을 건다.
+        접촉 후에는 _set_force 로 약한 힘(PRESS_FORCE)으로 낮춘다.
 
         힘제어 함수(task_compliance_ctrl / set_stiffnessx /
         set_desired_force)는 ref 인자를 받지 않고 전역 기준 좌표계를
@@ -168,11 +227,12 @@ class PlateController:
         향하므로 force_sign 으로 방향을 지정한다(위치1 -1, 위치2 +1).
         반원 경로는 유저 좌표계(dish1) 기준 그대로다.
         """
+        magnitude = cfg.APPROACH_FORCE if magnitude is None else magnitude
         ret = set_ref_coord(DR_TOOL)
 
         fd = [0.0] * 6
         dr = [0] * 6
-        fd[cfg.FORCE_AXIS] = force_sign * cfg.APPROACH_FORCE
+        fd[cfg.FORCE_AXIS] = force_sign * magnitude
         dr[cfg.FORCE_AXIS] = 1
 
         r1 = task_compliance_ctrl()
@@ -181,28 +241,31 @@ class PlateController:
 
         self._log.info(f"ref_coord(TOOL)={ret}, compliance={r1}, "
                        f"stiffness={r2}, force={r3} "
-                       f"(approach {fd[cfg.FORCE_AXIS]}N on "
+                       f"(force {fd[cfg.FORCE_AXIS]}N on "
                        f"tool axis {cfg.FORCE_AXIS})")
 
-    def _wait_contact_then_release_force(self):
-        """접촉이 감지될 때까지 기다린 뒤 힘 지령만 해제한다.
+    def _wait_contact(self):
+        """접촉이 감지될 때까지 기다린다. 힘 지령은 그대로 유지한다.
 
-        release_force() 는 힘 지령만 풀고 순응 제어는 유지하므로,
-        접시가 수세미에 닿은 상태에서 부드럽게 세척할 수 있다.
+        release_force() 를 부르지 않으므로 순응 제어와 힘 지령이
+        끊기지 않고 이어진다. 정지 요청이 오면 즉시 PlateAborted 를
+        던진다 — 반드시 호출부의 try(finally: _force_off) 안에서
+        불러야 힘제어가 켜진 채 남지 않는다.
         """
-        deadline = int(cfg.CONTACT_TIMEOUT / 0.1)
-        for _ in range(deadline):
+        deadline = int(cfg.CONTACT_TIMEOUT / cfg.CONTACT_POLL)
+        for i in range(deadline):
+            motion_guard.check_abort()
+            if cfg.FORCE_LOG and i % cfg.FORCE_LOG_EVERY == 0:
+                self.log_tool_force("    [contact] ")
             if check_force_condition(self._AXIS_CONST[cfg.FORCE_AXIS],
                                      min=cfg.CONTACT_FORCE,
                                      ref=DR_TOOL) == 0:
-                self._log.info("  contact detected -> release force")
-                break
-            wait(0.1)
-        else:
-            self._log.warn(f"  no contact within {cfg.CONTACT_TIMEOUT}s "
-                           "-> release force anyway")
+                self._log.info("  contact detected")
+                return True
+            wait(cfg.CONTACT_POLL)
 
-        release_force(time=0.0)   # 순응 제어는 유지
+        self._log.warn(f"  no contact within {cfg.CONTACT_TIMEOUT}s")
+        return False
 
     def _force_off(self):
         """힘/순응 제어 해제 후 기준 좌표계를 base 로 복원."""
@@ -215,16 +278,38 @@ class PlateController:
         finally:
             set_ref_coord(DR_BASE)
 
+    def log_tool_force(self, prefix=""):
+        """툴 좌표계 기준 현재 힘/토크를 로그로 남긴다. -> 법선 축 힘
+
+        check_force_condition 은 조건 통과 여부만 알려주므로,
+        임계값을 실측으로 정하려면 실제 값을 봐야 한다.
+        """
+        f = get_tool_force(DR_TOOL)
+        normal = f[cfg.FORCE_AXIS]
+        self._log.info(
+            f"{prefix}F=[{f[0]:6.2f} {f[1]:6.2f} {f[2]:6.2f}] "
+            f"T=[{f[3]:6.2f} {f[4]:6.2f} {f[5]:6.2f}]  "
+            f"normal(axis{cfg.FORCE_AXIS})={normal:6.2f}N")
+        return normal
+
+    def _set_force(self, force_sign, magnitude):
+        """툴 좌표계 법선 축으로 지정한 크기의 힘을 건다."""
+        fd = [0.0] * 6
+        dr = [0] * 6
+        fd[cfg.FORCE_AXIS] = force_sign * magnitude
+        dr[cfg.FORCE_AXIS] = 1
+        return set_desired_force(fd, dr, time=0.0, mod=DR_FC_MOD_ABS)
+
     def wash_arcs(self, coord, radii=None, passes=None,
                   start_angle=0.0, z_offset=0.0, force_sign=None):
-        """현재 위치를 중심으로 하는 동심 반원들을 movec 으로 왕복 세척.
+        """동심 반원 세척 (뒤집기 전 볼록면용).
 
-        현재 위치(= 좌표계 원점, 접시 중심)를 중심으로 각 반지름마다
-        start_angle -> +90 -> +180 반원을 passes 회 왕복한 뒤 다음
-        반지름으로 넘어간다.
+        현재 위치(= 유저 좌표계 원점, 접시 중심)를 중심으로 각 반지름마다
+        start_angle -> +90 -> +180 반원을 movec 으로 passes 회 왕복한다.
 
+        이동은 유저 좌표계(coord), 힘/순응은 툴 좌표계 기준이다.
         세 점의 자세를 현재 자세로 동일하게 지정하므로 파지 자세가
-        유지되고, Z 를 고정하므로 좌표계 XY 평면(접시 면)에서만 움직인다.
+        유지되고, Z 를 고정하므로 접시 면에서만 움직인다.
         """
         radii = cfg.WASH_RADII if radii is None else radii
         passes = cfg.WASH_PASSES if passes is None else passes
@@ -242,11 +327,15 @@ class PlateController:
 
         if cfg.USE_FORCE_CONTROL:
             sign = cfg.WASH1_FORCE_SIGN if force_sign is None else force_sign
-            self._force_on(sign)                       # 강한 힘으로 접근
-            self._wait_contact_then_release_force()    # 닿으면 힘만 해제
+            self._force_on(sign)            # 접근용 강한 힘
 
         try:
+            if cfg.USE_FORCE_CONTROL:
+                self._wait_contact()        # 접촉 확인 (정지 시 즉시 탈출)
+                release_force(time=0.0)     # 힘만 해제 (순응은 유지)
+
             for r in radii:
+                self._check_abort()
                 self._log.info(f"  radius {r}mm")
 
                 p0 = posx(cx + r * math.cos(a0), cy + r * math.sin(a0),
@@ -275,8 +364,90 @@ class PlateController:
               ref=coord, mod=DR_MV_MOD_ABS)
         self._log.info("Wash arcs done")
 
+    def wash_sweeps(self, coord, force_sign, y_offsets=None,
+                    back_j=None, z_dists=None):
+        """직선 쓸기 세척 (뒤집은 뒤 오목면용).
+
+        이동/힘 모두 **툴 좌표계** 기준이다(원호 세척만 유저 좌표계).
+
+        접근할 때만 힘을 걸어 접촉시키고, 접촉되면 힘 지령을 해제한다.
+        접시가 곡면이라 쓸다 보면 자연히 눌리므로 힘을 계속 줄 필요가
+        없고, 계속 주면 관절 부하가 커져 안전모드에 걸린다.
+        순응 제어는 유지해 곡면을 따라가게 한다.
+
+        한 오프셋에서 SWEEP_Z_DIST 만큼 나갔다가, 수세미 반대 방향으로
+        살짝 빼서 접촉을 끊고 세척 시작 자세로 복귀한다. 이를 Y 오프셋
+        마다 반복해 면을 채운다.
+
+        coord 인자는 호출부 호환을 위해 받지만 사용하지 않는다.
+        """
+        y_offsets = cfg.SWEEP_Y_OFFSETS if y_offsets is None else y_offsets
+        back_dx = -force_sign * cfg.SWEEP_BACKOFF
+
+        # 오프셋별 쓸기 거리. 길이가 안 맞으면 기본값으로 채운다.
+        if z_dists is None:
+            z_dists = cfg.SWEEP_Z_DISTS
+        if len(z_dists) != len(y_offsets):
+            z_dists = [cfg.SWEEP_Z_DIST] * len(y_offsets)
+
+        self._log.info(f"Wash sweeps (TOOL frame): y_offsets={y_offsets}, "
+                       f"dists={z_dists}, sign={cfg.SWEEP_Z_SIGN}")
+
+        def move_tool(dy=0.0, dz=0.0, dx=0.0, fast=False):
+            """툴 좌표계 상대 이동(동기).
+
+            fast=True 는 접촉이 없거나 약한 구간(오프셋 이동, 후퇴)에
+            쓰는 빠른 속도다. 실제 쓸어내는 구간은 기본 속도를 쓴다.
+            """
+            vel = cfg.SWEEP_MOVE_VEL if fast else cfg.SWEEP_VEL
+            acc = cfg.SWEEP_MOVE_ACC if fast else cfg.SWEEP_ACC
+            movel(posx(dx, dy, dz, 0.0, 0.0, 0.0),
+                  vel=vel, acc=acc,
+                  ref=DR_TOOL, mod=DR_MV_MOD_REL)
+
+        try:
+            for i, dy in enumerate(y_offsets):
+                self._check_abort()
+                sweep_dz = cfg.SWEEP_Z_SIGN * z_dists[i]
+                self._log.info(f"  sweep {i + 1}/{len(y_offsets)} "
+                               f"(tool y={dy}, dist={z_dists[i]}mm)")
+
+                # 세척 시작 자세로 복귀 (매 스트로크 같은 지점에서 출발)
+                if back_j is not None and i > 0:
+                    movej(back_j, vel=cfg.VEL_J_SLOW, acc=cfg.ACC_J_SLOW)
+
+                # 접근용 힘으로 접촉시킨 뒤 힘만 해제 (순응은 유지)
+                if cfg.USE_FORCE_CONTROL:
+                    self._force_on(force_sign)
+                    self._wait_contact()
+                    release_force(time=0.0)
+                    self._log.info("  force released (compliance only)")
+
+                # Y 오프셋으로 이동 (접촉 유지된 채 옆으로만 이동)
+                move_tool(dy=dy, fast=True)
+
+                # 바깥으로 쓸기
+                if cfg.FORCE_LOG:
+                    self.log_tool_force("    [out]  ")
+                move_tool(dz=sweep_dz)
+                if cfg.FORCE_LOG:
+                    self.log_tool_force("    [end]  ")
+
+                # 접시 반대 방향으로 빼서 접촉을 끊는다
+                move_tool(dx=back_dx, fast=True)
+
+                # 힘/순응 해제 후 다음 스트로크 준비
+                if cfg.USE_FORCE_CONTROL:
+                    self._force_off()
+        finally:
+            if cfg.USE_FORCE_CONTROL:
+                self._force_off()
+
+        self._log.info("Wash sweeps done")
+
     def wash_face(self, approach_j, start_j, start_angle,
-                  force_sign, coord=None, label="", skip_approach=False):
+                  force_sign, coord=None, label="", skip_approach=False,
+                  sweep=False):
         """접근점 경유 -> 세척 시작점 -> 동심 반원 세척 -> 접근점 이탈
 
         좌표계는 dish1(101) 하나만 사용한다. 세척 위치가 달라도 좌표계
@@ -294,8 +465,11 @@ class PlateController:
         self._log.info("  -> wash start")
         movej(start_j, vel=cfg.VEL_J_SLOW, acc=cfg.ACC_J_SLOW)
 
-        self.wash_arcs(coord, start_angle=start_angle,
-                       force_sign=force_sign)
+        if sweep:
+            self.wash_sweeps(coord, force_sign, back_j=start_j)
+        else:
+            self.wash_arcs(coord, start_angle=start_angle,
+                           force_sign=force_sign)
 
         self._log.info("  -> leave")
         movej(approach_j, vel=cfg.VEL_J_SLOW, acc=cfg.ACC_J_SLOW)
@@ -303,20 +477,26 @@ class PlateController:
         self._log.info(f"--- Wash: {label} done ---")
 
     def wash_plate(self, skip_first_approach=False):
-        """세척 위치 1 -> 세척 위치 2 순으로 세척한다.
+        """세척 위치 1 -> 세척 위치 2 순으로 한 번 세척한다.
 
-        skip_first_approach=True 면 위치 1 의 접근 이동을 건너뛴다.
-        (food_check 의 5단계가 이미 접근점으로 옮겨놓은 경우)
+        run_plate_task 는 단계 번호를 매기려고 wash_face 를 직접 부르므로
+        이 메서드는 세척만 따로 돌려볼 때 쓴다.
+
+        세척 방식은 위치에 따라 다르다.
+          위치 1 : 동심 반원 (wash_arcs)
+          위치 2 : 직선 쓸기 (wash_sweeps)
         """
         self._log.info("===== Wash plate: start =====")
 
         self.wash_face(WASH1_APPROACH_J, WASH1_START_J,
                        cfg.WASH1_START_ANGLE, cfg.WASH1_FORCE_SIGN,
-                       label="wash pos 1",
-                       skip_approach=skip_first_approach)
+                       label="wash pos 1 (arc)",
+                       skip_approach=skip_first_approach,
+                       sweep=False)
         self.wash_face(WASH2_APPROACH_J, WASH2_START_J,
                        cfg.WASH2_START_ANGLE, cfg.WASH2_FORCE_SIGN,
-                       label="wash pos 2")
+                       label="wash pos 2 (sweep)",
+                       sweep=True)
 
         self._log.info("===== Wash plate: done =====")
 
@@ -352,6 +532,7 @@ class PlateController:
         self._log.info(f"Rotate plate: {steps} step(s)")
 
         for i in range(steps):
+            self._check_abort()
             self._log.info(f"[rotate {i + 1}/{steps}]")
             self.rotate_plate_once()
 
@@ -391,34 +572,124 @@ class PlateController:
 
     # ================= 전체 시나리오 =================
     def run_plate_task(self, rotate=True):
-        """Pick -> 음식물 확인/배출 -> Wash -> (Rotate -> Wash) -> Place -> Home
+        """전체 접시 처리.
 
-        음식물 확인/배출과 그 뒤 '다음 작업 위치' 이동은 food_check 모듈이
-        담당하며, 그 이동이 세척 위치 1 접근을 대신한다.
+        각 단계 시작 시 on_step 콜백으로 단계 번호를 알린다.
+          1 파지 / 2 음식물 배출 / 3 세척 / 4 세척 / 5 회전
+          6 세척 / 7 세척 / 8 보관 / 0 완료(대기)
+
         rotate=True 면 세척 후 파지를 옮겨(rotate_plate) 그리퍼가 가렸던
         영역을 한 번 더 세척한다.
+
+        중단 요청(request_abort)이 오면 PlateAborted 를 던진다.
         """
+        self.clear_abort()
         self._log.info("########## Plate task: START ##########")
 
         self.move_home()
+
+        self._check_abort()
+        self._step(1)                       # 접시 파지
         self.pick_plate()
 
-        # 음식물 확인 -> (있으면) 배출 -> 세척 위치 1 접근점으로 이동
-        # 이 이동이 세척 접근을 대신하므로 첫 세척은 접근을 건너뛴다.
+        # 음식물 확인 -> (있으면) 배출 -> WASH1_APPROACH_J 로 이동
+        # food_check 가 이미 접근점으로 옮겨놓으므로 첫 접근은 생략한다.
+        self._check_abort()
+        self._step(2)                       # 음식물 배출
         food_check.run_food_check(self._log)
 
-        self.wash_plate(skip_first_approach=True)
+        self._check_abort()
+        self._step(3)                       # 세척 (위치 1)
+        self.wash_face(WASH1_APPROACH_J, WASH1_START_J,
+                       cfg.WASH1_START_ANGLE, cfg.WASH1_FORCE_SIGN,
+                       label="wash pos 1 (arc)",
+                       skip_approach=True, sweep=False)
+
+        self._check_abort()
+        self._step(4)                       # 세척 (위치 2)
+        self.wash_face(WASH2_APPROACH_J, WASH2_START_J,
+                       cfg.WASH2_START_ANGLE, cfg.WASH2_FORCE_SIGN,
+                       label="wash pos 2 (sweep)", sweep=True)
 
         if rotate:
+            # 파지를 옮겨 그리퍼가 가렸던 영역을 한 번 더 세척
+            self._check_abort()
+            self._step(5)                   # 접시 회전
             self.rotate_plate()
-            self.wash_plate()
 
+            self._check_abort()
+            self._step(6)                   # 세척 (위치 1)
+            self.wash_face(WASH1_APPROACH_J, WASH1_START_J,
+                           cfg.WASH1_START_ANGLE, cfg.WASH1_FORCE_SIGN,
+                           label="wash pos 1 (arc)", sweep=False)
+
+            self._check_abort()
+            self._step(7)                   # 세척 (위치 2)
+            self.wash_face(WASH2_APPROACH_J, WASH2_START_J,
+                           cfg.WASH2_START_ANGLE, cfg.WASH2_FORCE_SIGN,
+                           label="wash pos 2 (sweep)", sweep=True)
+
+        self._check_abort()
+        self._step(8)                       # 접시 보관
         self.place_plate()
         self.move_home()
 
+        self._step(0)                       # 완료 -> 대기
         self._log.info("########## Plate task: COMPLETE ##########")
 
     # ================= 테스트 유틸 =================
+    def test_stiffness(self, force_sign, duration=20.0, interval=0.2):
+        """강성이 실제로 걸리는지 확인한다(현재 자세 그대로).
+
+        순응 제어만 켜고 로봇은 움직이지 않는다. 손으로 밀어보면서
+        힘 축(FORCE_AXIS) 방향으로는 밀리고 나머지 방향으로는 안 밀리는지
+        확인한다. 힘 값과 함께 base 기준 위치도 찍어서 실제로 밀렸는지 본다.
+        """
+        self._log.info(
+            f"Test stiffness {duration}s: stiffness={cfg.WASH_STIFFNESS}, "
+            f"force_axis={cfg.FORCE_AXIS}, sign={force_sign}")
+
+        set_ref_coord(DR_TOOL)
+        r1 = task_compliance_ctrl()
+        r2 = set_stiffnessx(cfg.WASH_STIFFNESS, time=0.0)
+        r3 = self._set_force(force_sign, cfg.APPROACH_FORCE)
+        self._log.info(f"compliance={r1}, stiffness={r2}, force={r3}")
+
+        start, _ = get_current_posx(ref=DR_BASE)
+        try:
+            for _ in range(int(duration / interval)):
+                f = get_tool_force(DR_TOOL)
+                cur, _ = get_current_posx(ref=DR_BASE)
+                d = [cur[i] - start[i] for i in range(3)]
+                self._log.info(
+                    f"  F=[{f[0]:6.2f} {f[1]:6.2f} {f[2]:6.2f}]  "
+                    f"moved(base)=[{d[0]:6.1f} {d[1]:6.1f} {d[2]:6.1f}]mm")
+                wait(interval)
+        finally:
+            self._force_off()
+
+        self._log.info("Test stiffness done")
+
+    def monitor_force(self, duration=10.0, interval=0.2):
+        """지정 시간 동안 툴 기준 힘을 계속 찍는다.
+
+        임계값을 정하기 위한 진단용. 로봇을 세척 자세에 두고 손으로
+        접시를 수세미에 붙였다 떼면서 값이 어떻게 변하는지 본다.
+        """
+        self._log.info(f"Monitor force for {duration}s "
+                       f"(normal axis = {cfg.FORCE_AXIS})")
+        n = int(duration / interval)
+        vals = []
+        for _ in range(n):
+            vals.append(self.log_tool_force("  "))
+            wait(interval)
+
+        if vals:
+            self._log.info(f"normal force: min={min(vals):.2f} "
+                           f"max={max(vals):.2f} "
+                           f"avg={sum(vals)/len(vals):.2f} N")
+        return vals
+
     def probe_tool_axis(self, axis="x", amp=10.0):
         """툴 좌표계 축 방향으로 왕복. 어느 축이 접시 법선인지 확인용.
 

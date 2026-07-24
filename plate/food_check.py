@@ -12,15 +12,18 @@
 
 import time
 
-from DSR_ROBOT2 import movej, movel, get_tool_force, DR_BASE
+from DSR_ROBOT2 import get_tool_force, DR_BASE
 from DR_common2 import posj, posx
+
+# 모션은 정지 가드를 거친 버전을 쓴다 — 정지 시 털기/이동 루프도 즉시 끊긴다
+from .motion_guard import movej, movel
 
 from .waypoints import WASH1_APPROACH_J
 
 
 # ================= 판정 파라미터 (원본 값) =================
 # 음식물이 있으면 Fz 가 음수 방향으로 더 크게 측정된다.
-FOOD_FZ_THRESHOLD = -0.9      # [N] 이 값 이하이면 음식물 있음
+FOOD_FZ_THRESHOLD = -2.62      # [N] 이 값 이하이면 음식물 있음
 SAMPLES = 50
 SAMPLE_INTERVAL = 0.05
 
