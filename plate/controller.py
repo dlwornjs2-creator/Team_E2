@@ -12,10 +12,9 @@ import math
 
 from DSR_ROBOT2 import (
     set_tool, set_tcp, get_tool, get_tcp, get_current_posx,
-    movej, movel, movec,
     set_velj, set_accj, set_velx, set_accx,
     set_ref_coord, wait,
-    amovel, check_motion, mwait, get_tool_force,
+    check_motion, mwait, get_tool_force,
     task_compliance_ctrl, set_stiffnessx, set_desired_force,
     release_force, release_compliance_ctrl, check_force_condition,
     DR_BASE, DR_TOOL, DR_AXIS_X, DR_AXIS_Y, DR_AXIS_Z,
@@ -23,6 +22,11 @@ from DSR_ROBOT2 import (
 )
 from DR_common2 import posx
 from dsr_msgs2.srv import MoveStop
+
+# 모션 함수는 정지 가드를 거친 버전을 쓴다. 호출 지점은 그대로 두고
+# import 만 바꾸면 모든 movej/movel/movec 이 abort 플래그를 확인한다.
+from . import motion_guard
+from .motion_guard import movej, movel, movec, amovel, PlateAborted
 
 from . import config as cfg
 from .gripper import Gripper
@@ -38,13 +42,24 @@ from .waypoints import (
 )
 
 
+# PlateAborted 는 motion_guard 에서 정의하고 여기서 재노출한다.
+# (main_node 의 `from plate.controller import PlateAborted` 호환 유지)
+
+
 class PlateController:
     """접시 파지 -> 무게확인 -> 세척 -> 배치 담당."""
 
-    def __init__(self, node):
+    def __init__(self, node, on_step=None):
         self.node = node
         self.gripper = Gripper(node)
         self._log = node.get_logger()
+
+        # 진행 단계를 바깥(메인 노드)에 알리는 콜백.
+        # 컨트롤러는 ROS 통신을 모르고 숫자만 넘긴다.
+        self._on_step = on_step
+
+        # 긴급정지 플래그는 motion_guard 가 전역으로 관리한다.
+        # (모든 movej/movel/movec 호출이 플래그를 자동 확인)
 
         # 이 배포판에는 stop() 함수가 없어 motion/move_stop 서비스를
         # 직접 호출한다(기어 프로젝트에서 검증된 방식).
@@ -55,6 +70,35 @@ class PlateController:
         req = MoveStop.Request()
         req.stop_mode = st_mode
         self._stop_cli.call_async(req)
+
+    # ================= 진행 상황 / 중단 =================
+    def _step(self, n):
+        """진행 단계를 바깥에 알린다(콜백이 없으면 아무것도 안 함)."""
+        if self._on_step is not None:
+            self._on_step(n)
+
+    def request_abort(self):
+        """긴급정지 요청. 진행 중인 모션을 끊고 이후 모션을 막는다.
+
+        stop_motion 은 call_async(응답 대기 없음)라 어느 스레드에서
+        불러도 executor 와 충돌하지 않는다. 플래그를 먼저 세워
+        끊긴 모션이 반환되는 즉시 가드가 PlateAborted 를 던지게 한다.
+        """
+        motion_guard.set_abort()
+        self._log.warn("Abort requested")
+        self.stop_motion()
+
+    def clear_abort(self):
+        """중단 플래그 해제. 다음 작업 시작 전에 부른다."""
+        motion_guard.clear_abort()
+
+    @property
+    def aborted(self):
+        return motion_guard.is_aborted()
+
+    def _check_abort(self):
+        """중단 요청이 있으면 예외를 던져 작업을 끊는다."""
+        motion_guard.check_abort()
 
     # ================= 초기화 =================
     def setup(self):
@@ -106,7 +150,7 @@ class PlateController:
 
     # ================= Step 1: 접시 파지 =================
     def pick_plate(self):
-        """APPROACH -> PICK -> 파지 -> 수직 RETREAT
+        """[1단계] APPROACH -> PICK -> 파지 -> 수직 RETREAT
 
         이 배포판의 movej 는 posx 를 받지 않으므로(Invalid type : pos)
         posx 로 이동할 때는 movel 을 쓴다.
@@ -204,10 +248,13 @@ class PlateController:
         """접촉이 감지될 때까지 기다린다. 힘 지령은 그대로 유지한다.
 
         release_force() 를 부르지 않으므로 순응 제어와 힘 지령이
-        끊기지 않고 이어진다.
+        끊기지 않고 이어진다. 정지 요청이 오면 즉시 PlateAborted 를
+        던진다 — 반드시 호출부의 try(finally: _force_off) 안에서
+        불러야 힘제어가 켜진 채 남지 않는다.
         """
         deadline = int(cfg.CONTACT_TIMEOUT / cfg.CONTACT_POLL)
         for i in range(deadline):
+            motion_guard.check_abort()
             if cfg.FORCE_LOG and i % cfg.FORCE_LOG_EVERY == 0:
                 self.log_tool_force("    [contact] ")
             if check_force_condition(self._AXIS_CONST[cfg.FORCE_AXIS],
@@ -281,11 +328,14 @@ class PlateController:
         if cfg.USE_FORCE_CONTROL:
             sign = cfg.WASH1_FORCE_SIGN if force_sign is None else force_sign
             self._force_on(sign)            # 접근용 강한 힘
-            self._wait_contact()            # 접촉 확인
-            release_force(time=0.0)         # 힘만 해제 (순응은 유지)
 
         try:
+            if cfg.USE_FORCE_CONTROL:
+                self._wait_contact()        # 접촉 확인 (정지 시 즉시 탈출)
+                release_force(time=0.0)     # 힘만 해제 (순응은 유지)
+
             for r in radii:
+                self._check_abort()
                 self._log.info(f"  radius {r}mm")
 
                 p0 = posx(cx + r * math.cos(a0), cy + r * math.sin(a0),
@@ -357,6 +407,7 @@ class PlateController:
 
         try:
             for i, dy in enumerate(y_offsets):
+                self._check_abort()
                 sweep_dz = cfg.SWEEP_Z_SIGN * z_dists[i]
                 self._log.info(f"  sweep {i + 1}/{len(y_offsets)} "
                                f"(tool y={dy}, dist={z_dists[i]}mm)")
@@ -426,27 +477,25 @@ class PlateController:
         self._log.info(f"--- Wash: {label} done ---")
 
     def wash_plate(self, skip_first_approach=False):
-        """세척 위치 1(앞면) -> 세척 위치 2(뒷면) 순으로 세척한다.
+        """세척 위치 1 -> 세척 위치 2 순으로 한 번 세척한다.
 
-        skip_first_approach=True 면 위치 1 의 접근 이동을 건너뛴다.
-        (food_check 의 5단계가 이미 접근점으로 옮겨놓은 경우)
+        run_plate_task 는 단계 번호를 매기려고 wash_face 를 직접 부르므로
+        이 메서드는 세척만 따로 돌려볼 때 쓴다.
 
-        세척 방식은 면에 따라 다르다.
-          위치 1 (앞면, 볼록) : 동심 반원 (wash_arcs)
-          위치 2 (뒷면, 오목) : 직선 쓸기 (wash_sweeps)
-        오목면에서 원호를 그리면 곡면이 수세미를 밀어내 큰 힘이 걸리므로
-        뒷면만 직선으로 쓸어낸다.
+        세척 방식은 위치에 따라 다르다.
+          위치 1 : 동심 반원 (wash_arcs)
+          위치 2 : 직선 쓸기 (wash_sweeps)
         """
         self._log.info("===== Wash plate: start =====")
 
         self.wash_face(WASH1_APPROACH_J, WASH1_START_J,
                        cfg.WASH1_START_ANGLE, cfg.WASH1_FORCE_SIGN,
-                       label="wash pos 1 (front, arc)",
+                       label="wash pos 1 (arc)",
                        skip_approach=skip_first_approach,
                        sweep=False)
         self.wash_face(WASH2_APPROACH_J, WASH2_START_J,
                        cfg.WASH2_START_ANGLE, cfg.WASH2_FORCE_SIGN,
-                       label="wash pos 2 (back, sweep)",
+                       label="wash pos 2 (sweep)",
                        sweep=True)
 
         self._log.info("===== Wash plate: done =====")
@@ -483,6 +532,7 @@ class PlateController:
         self._log.info(f"Rotate plate: {steps} step(s)")
 
         for i in range(steps):
+            self._check_abort()
             self._log.info(f"[rotate {i + 1}/{steps}]")
             self.rotate_plate_once()
 
@@ -522,32 +572,69 @@ class PlateController:
 
     # ================= 전체 시나리오 =================
     def run_plate_task(self, rotate=True):
-        """Pick -> 음식물 확인/배출 -> Wash -> (Rotate -> Wash) -> Place -> Home
+        """전체 접시 처리.
 
-        음식물 확인/배출과 그 뒤 '다음 작업 위치' 이동은 food_check 모듈이
-        담당하며, 그 이동이 세척 위치 1 접근을 대신한다.
+        각 단계 시작 시 on_step 콜백으로 단계 번호를 알린다.
+          1 파지 / 2 음식물 배출 / 3 세척 / 4 세척 / 5 회전
+          6 세척 / 7 세척 / 8 보관 / 0 완료(대기)
+
         rotate=True 면 세척 후 파지를 옮겨(rotate_plate) 그리퍼가 가렸던
         영역을 한 번 더 세척한다.
+
+        중단 요청(request_abort)이 오면 PlateAborted 를 던진다.
         """
+        self.clear_abort()
         self._log.info("########## Plate task: START ##########")
 
         self.move_home()
+
+        self._check_abort()
+        self._step(1)                       # 접시 파지
         self.pick_plate()
 
         # 음식물 확인 -> (있으면) 배출 -> WASH1_APPROACH_J 로 이동
         # food_check 가 이미 접근점으로 옮겨놓으므로 첫 접근은 생략한다.
+        self._check_abort()
+        self._step(2)                       # 음식물 배출
         food_check.run_food_check(self._log)
 
-        self.wash_plate(skip_first_approach=True)
+        self._check_abort()
+        self._step(3)                       # 세척 (위치 1)
+        self.wash_face(WASH1_APPROACH_J, WASH1_START_J,
+                       cfg.WASH1_START_ANGLE, cfg.WASH1_FORCE_SIGN,
+                       label="wash pos 1 (arc)",
+                       skip_approach=True, sweep=False)
+
+        self._check_abort()
+        self._step(4)                       # 세척 (위치 2)
+        self.wash_face(WASH2_APPROACH_J, WASH2_START_J,
+                       cfg.WASH2_START_ANGLE, cfg.WASH2_FORCE_SIGN,
+                       label="wash pos 2 (sweep)", sweep=True)
 
         if rotate:
             # 파지를 옮겨 그리퍼가 가렸던 영역을 한 번 더 세척
+            self._check_abort()
+            self._step(5)                   # 접시 회전
             self.rotate_plate()
-            self.wash_plate()
 
+            self._check_abort()
+            self._step(6)                   # 세척 (위치 1)
+            self.wash_face(WASH1_APPROACH_J, WASH1_START_J,
+                           cfg.WASH1_START_ANGLE, cfg.WASH1_FORCE_SIGN,
+                           label="wash pos 1 (arc)", sweep=False)
+
+            self._check_abort()
+            self._step(7)                   # 세척 (위치 2)
+            self.wash_face(WASH2_APPROACH_J, WASH2_START_J,
+                           cfg.WASH2_START_ANGLE, cfg.WASH2_FORCE_SIGN,
+                           label="wash pos 2 (sweep)", sweep=True)
+
+        self._check_abort()
+        self._step(8)                       # 접시 보관
         self.place_plate()
         self.move_home()
 
+        self._step(0)                       # 완료 -> 대기
         self._log.info("########## Plate task: COMPLETE ##########")
 
     # ================= 테스트 유틸 =================
