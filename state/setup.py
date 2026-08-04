@@ -25,6 +25,7 @@ setup(
     entry_points={
         'console_scripts': [
             'state_node = state.state_node:main',
+            'work_test = state.work_test:main',
         ],
     },
 )

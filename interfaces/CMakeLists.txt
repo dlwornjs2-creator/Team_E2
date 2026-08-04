@@ -29,6 +29,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/DbSave.srv"
   "srv/DbLoad.srv"
   "srv/TargetSearch.srv"
+  "action/Search.action"
 )
 ament_export_dependencies(rosidl_default_runtime)
 ament_package()

@@ -1,33 +1,40 @@
-"""상태 관리 노드 — 1단계.
+"""상태 관리 노드 — 2단계.
 
-지금은 부팅 시 다른 노드가 올라왔는지 확인하는 것까지만 한다.
-명령 처리는 아직 없다.
+부팅 시 다른 노드 준비 확인 + 음성 명령을 받아 탐색 액션으로 넘긴다.
 
 순서도 대응:
   시작 -> State = LOAD -> 각 노드에 상태 확인 요청
        -> 성공? -> No 면 재시도 / Yes 면 State = IDLE -> 대기
+       -> 명령 수신 -> 상태 확인 -> IDLE 이면 State = RUN + 액션 발행
+                                  아니면 거절
 
 상태
   LOAD  부팅 중. 다른 노드 준비를 기다리는 중
-  IDLE  대기. 명령을 받을 수 있는 상태
-  RUN   작업 중. (아직 사용하지 않음)
+  IDLE  대기. 이 상태에서만 명령을 받는다
+  RUN   작업 중. 새 명령은 거절한다
 
-발행
-  /state/current  std_msgs/String  현재 상태 (JSON)
+제공
+  service  /state/target_search  interfaces/TargetSearch  음성 노드의 명령 접수
+  topic    /state/current        std_msgs/String          현재 상태 (JSON)
 
 사용
-  /<노드>/init    interfaces/NodeInit  각 노드의 준비 확인
+  service  /<노드>/init          interfaces/NodeInit      각 노드의 준비 확인
+  action   /item/search          interfaces/Search        탐색 실행 지시
 """
 
 import json
 import time
 
 import rclpy
+from rclpy.action import ActionClient
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
 from std_msgs.msg import String
 
-from interfaces.srv import NodeInit
+from interfaces.action import Search
+from interfaces.srv import NodeInit, TargetSearch
 
 
 # ----------------------------------------------------------------------
@@ -48,14 +55,21 @@ class StateNode(Node):
         self.declare_parameter('wait_timeout', 5.0)     # 서비스 등장 대기 [s]
         self.declare_parameter('retry_period', 2.0)     # 재시도 간격 [s]
         self.declare_parameter('max_retries', 0)        # 0 이면 무한 재시도
+        self.declare_parameter('search_action', 'item/search')
+        self.declare_parameter('goal_accept_timeout', 3.0)
 
         self.targets = list(self.get_parameter('targets').value)
         self.wait_timeout = self.get_parameter('wait_timeout').value
         self.retry_period = self.get_parameter('retry_period').value
         self.max_retries = self.get_parameter('max_retries').value
+        self.search_action = self.get_parameter('search_action').value
+        self.goal_accept_timeout = self.get_parameter('goal_accept_timeout').value
 
         self.state = LOAD
         self.ready = {name: False for name in self.targets}
+        self.current_goal = None        # 진행 중인 탐색 goal handle
+
+        cb = ReentrantCallbackGroup()
 
         # 현재 상태 발행. 늦게 뜨는 노드도 마지막 상태를 바로 받도록 TRANSIENT_LOCAL
         self.state_pub = self.create_publisher(
@@ -65,9 +79,19 @@ class StateNode(Node):
                        durability=QoSDurabilityPolicy.TRANSIENT_LOCAL))
 
         self.init_clients = {
-            name: self.create_client(NodeInit, f'{name}/init')
+            name: self.create_client(NodeInit, f'{name}/init',
+                                     callback_group=cb)
             for name in self.targets
         }
+
+        # 음성 노드가 부르는 명령 접수 창구
+        self.create_service(
+            TargetSearch, 'state/target_search',
+            self.on_target_search, callback_group=cb)
+
+        # 실제 탐색을 시킬 액션 클라이언트
+        self.search_cli = ActionClient(
+            self, Search, self.search_action, callback_group=cb)
 
         self.publish_state()
         self.get_logger().info(f'확인 대상: {self.targets}')
@@ -122,6 +146,101 @@ class StateNode(Node):
             self.publish_state('재시도 대기')
             time.sleep(self.retry_period)
 
+    # ------------------------------------------------------------------
+    # 명령 접수 (게이트키퍼)
+    # ------------------------------------------------------------------
+    def on_target_search(self, request, response):
+        """음성 노드의 탐색 명령. 상태를 보고 받을지 거절할지 판단한다."""
+        name = request.target_name.strip()
+        label = request.class_label.strip()
+        self.get_logger().info(f"명령 수신: target='{name}' class='{label}'")
+
+        if not name and not label:
+            response.success = False
+            response.message = 'target_name 과 class_label 이 모두 비어 있습니다'
+            self.get_logger().warn(f'거절: {response.message}')
+            return response
+
+        if self.state != IDLE:
+            response.success = False
+            response.message = f'지금은 {self.state} 상태라 명령을 받을 수 없습니다'
+            self.get_logger().warn(f'거절: {response.message}')
+            return response
+
+        if not self.search_cli.server_is_ready():
+            response.success = False
+            response.message = f'탐색 노드 없음 (/{self.search_action})'
+            self.get_logger().error(f'거절: {response.message}')
+            return response
+
+        handle = self.send_search_goal(name, label)
+        if handle is None:
+            response.success = False
+            response.message = '탐색 노드가 명령을 받지 않았습니다'
+            self.get_logger().error(f'거절: {response.message}')
+            return response
+
+        # 여기서 응답은 "접수 완료" 까지만. 결과는 액션으로 따로 돌아온다
+        self.current_goal = handle
+        self.set_state(RUN, f"탐색 시작: {name or label}")
+
+        response.success = True
+        response.message = f"'{name or label}' 탐색을 시작합니다"
+        return response
+
+    # ------------------------------------------------------------------
+    # 탐색 액션 발행
+    # ------------------------------------------------------------------
+    def send_search_goal(self, name, label):
+        """탐색 goal 을 보낸다. 수락되면 goal handle, 아니면 None."""
+        goal = Search.Goal()
+        goal.target_name = name
+        goal.class_label = label
+
+        send_future = self.search_cli.send_goal_async(
+            goal, feedback_callback=self.on_search_feedback)
+
+        # 서비스 콜백 안이라 spin_until_future_complete 를 쓰면 교착이 생긴다
+        deadline = time.time() + self.goal_accept_timeout
+        while not send_future.done() and time.time() < deadline:
+            time.sleep(0.02)
+
+        if not send_future.done():
+            self.get_logger().error('탐색 goal 응답 시간 초과')
+            return None
+
+        handle = send_future.result()
+        if not handle.accepted:
+            return None
+
+        # 결과가 오면 IDLE 로 되돌린다
+        handle.get_result_async().add_done_callback(self.on_search_result)
+        return handle
+
+    def on_search_feedback(self, feedback_msg):
+        fb = feedback_msg.feedback
+        self.get_logger().info(
+            f'  탐색 중: {fb.step} ({fb.progress * 100:.0f}%)')
+
+    def on_search_result(self, future):
+        """탐색이 끝나면 호출된다. 성공/실패/취소 모두 여기로 온다."""
+        self.current_goal = None
+
+        try:
+            res = future.result().result
+        except Exception as e:      # noqa: BLE001
+            self.get_logger().error(f'탐색 결과 수신 실패: {e}')
+            self.set_state(IDLE, '탐색 실패')
+            return
+
+        if res.success:
+            self.get_logger().info(f'탐색 완료: {res.message} @ {res.location}')
+        else:
+            self.get_logger().warn(f'탐색 실패: {res.message}')
+
+        self.set_state(IDLE, '탐색 종료')
+
+    # ------------------------------------------------------------------
     def check_one(self, name):
         """노드 하나에 준비 확인을 보낸다. 준비됐으면 True."""
         cli = self.init_clients[name]
@@ -164,7 +283,10 @@ def main(args=None):
     node = None
     try:
         node = StateNode()
-        rclpy.spin(node)
+        # 서비스 콜백 안에서 액션 goal 을 보내야 해서 멀티스레드가 필요하다
+        executor = MultiThreadedExecutor()
+        executor.add_node(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     except Exception as e:      # noqa: BLE001
