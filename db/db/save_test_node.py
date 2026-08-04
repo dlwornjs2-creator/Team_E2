@@ -9,7 +9,8 @@
   3) 이름으로 검색        -> /db/load  {"name": "컵"}
   4) 클래스로 검색        -> /db/load  {"class_label": "cup"}
   5) 직접 등록            -> /db/save  (입력받은 1건)
-  9) 초기화 요청          -> /db/init
+  8) 전체 삭제            -> /db/clear (되돌릴 수 없음)
+  9) 초기화 확인          -> /db/init
   0) 종료
 """
 
@@ -19,7 +20,7 @@ import rclpy
 from rclpy.node import Node
 from std_srvs.srv import Trigger
 
-from interfaces.srv import DbLoad, DbSave
+from interfaces.srv import DbLoad, DbSave, NodeInit
 
 
 # 탐색 작업 1회분 = 리스트 1개. 호출할 때마다 다음 회차가 나간다
@@ -49,7 +50,8 @@ MENU = """
   3) 이름으로 검색
   4) 클래스로 검색
   5) 직접 등록
-  9) 초기화 요청 (/db/init)
+  8) 전체 삭제 (되돌릴 수 없음)
+  9) 초기화 확인 (/db/init)
   0) 종료
 ==================================
 선택: """
@@ -62,14 +64,16 @@ class DBTestNode(Node):
 
         self.save_cli = self.create_client(DbSave, 'db/save')
         self.load_cli = self.create_client(DbLoad, 'db/load')
-        self.init_cli = self.create_client(Trigger, 'db/init')
+        self.init_cli = self.create_client(NodeInit, 'db/init')
+        self.clear_cli = self.create_client(Trigger, 'db/clear')
 
         self.run_index = 0      # 다음에 보낼 테스트 회차
 
         self.get_logger().info('DB 노드 기다리는 중...')
         for cli, name in ((self.save_cli, 'save'),
                           (self.load_cli, 'load'),
-                          (self.init_cli, 'init')):
+                          (self.init_cli, 'init'),
+                          (self.clear_cli, 'clear')):
             if not cli.wait_for_service(timeout_sec=10.0):
                 raise RuntimeError(f'/db/{name} 서비스를 찾을 수 없습니다')
         self.get_logger().info('연결 완료')
@@ -148,10 +152,36 @@ class DBTestNode(Node):
               'confidence': 1.0}],
             source='manual')
 
-    def menu_init(self):
-        res = self.call(self.init_cli, Trigger.Request())
+    def menu_clear(self):
+        print('  !! items / sightings 를 전부 지웁니다. 되돌릴 수 없습니다.')
+        answer = input('  정말 지우려면 DELETE 를 그대로 입력하세요: ').strip()
+        if answer != 'DELETE':
+            print('  취소했습니다')
+            return
+
+        res = self.call(self.clear_cli, Trigger.Request())
         if res is not None:
             print(f'  [{"OK" if res.success else "실패"}] {res.message}')
+            if res.success:
+                self.run_index = 0      # 테스트 회차도 1회차부터 다시
+                print('  테스트 회차를 1회차로 되돌렸습니다')
+
+    def menu_init(self):
+        req = NodeInit.Request()
+        req.request = json.dumps({'node': 'db_test_node'}, ensure_ascii=False)
+
+        res = self.call(self.init_cli, req)
+        if res is None:
+            return
+
+        print(f'  [{"OK" if res.success else "준비 안 됨"}] {res.message}')
+        st = json.loads(res.response) if res.response else {}
+        if st:
+            print(f"    ready     : {st.get('ready')}")
+            print(f"    db_path   : {st.get('db_path')}")
+            print(f"    tables    : {st.get('tables')}")
+            print(f"    items     : {st.get('items')}건")
+            print(f"    sightings : {st.get('sightings')}건")
 
     # ------------------------------------------------------------------
     def loop(self):
@@ -173,13 +203,15 @@ class DBTestNode(Node):
                 self.send_load({'class_label': label}, f"'{label}' 검색 결과")
             elif choice == '5':
                 self.menu_manual()
+            elif choice == '8':
+                self.menu_clear()
             elif choice == '9':
                 self.menu_init()
             elif choice == '0':
                 print('종료합니다')
                 break
             else:
-                print('  !! 0~5, 9 중에서 선택하세요')
+                print('  !! 0~5, 8, 9 중에서 선택하세요')
 
 
 def main(args=None):

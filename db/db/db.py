@@ -6,11 +6,15 @@
        -> 요청 분기: 데이터 저장 / DB 탐색
 
 제공 서비스
-  /db/init      std_srvs/Trigger        상태 노드의 초기화 요청
-  /db/save      db_interfaces/DbSave    작업 완료 후 일괄 저장
-  /db/load      db_interfaces/DbLoad    물건 유무 및 위치 조회
+  /db/init      interfaces/NodeInit  상태 노드의 초기화 확인 요청 (전 노드 공용 타입)
+  /db/save      interfaces/DbSave    작업 완료 후 일괄 저장
+  /db/load      interfaces/DbLoad    물건 유무 및 위치 조회
+  /db/clear     std_srvs/Trigger     전체 삭제 (테스트용, allow_clear 로 차단 가능)
 
 JSON 형식
+  NodeInit 요청  {"node": "state_node"}
+  NodeInit 응답  {"ready": true, "db_path": "...", "items": 4, "sightings": 9}
+
   DbSave 요청  {"source": "item_node",
                "items": [{"name": "컵", "class_label": "cup",
                           "location": "주방 싱크대", "confidence": 0.92}, ...]}
@@ -31,7 +35,7 @@ import rclpy
 from rclpy.node import Node
 from std_srvs.srv import Trigger
 
-from interfaces.srv import DbLoad, DbSave
+from interfaces.srv import DbLoad, DbSave, NodeInit
 
 
 # ----------------------------------------------------------------------
@@ -161,10 +165,58 @@ def search_items(conn, name=None, class_label=None):
     return [dict(row) for row in conn.execute(sql, args)]
 
 
+def clear_all(conn):
+    """items / sightings 를 통째로 비운다. 되돌릴 수 없다.
+
+    반환: (지워진 items 수, 지워진 sightings 수)
+    """
+    with conn:
+        cur = conn.cursor()
+        n_items = cur.execute('SELECT COUNT(*) FROM items').fetchone()[0]
+        n_sight = cur.execute('SELECT COUNT(*) FROM sightings').fetchone()[0]
+        cur.execute('DELETE FROM sightings')   # 자식 먼저
+        cur.execute('DELETE FROM items')
+    return n_items, n_sight
+
+
 # ----------------------------------------------------------------------
 # 서비스 요청 처리 (JSON in -> JSON out)
 # ROS 객체를 안 써서 노드 없이도 단독 테스트가 된다
 # ----------------------------------------------------------------------
+def db_status(conn, db_path):
+    """DB 준비 상태를 dict 로 돌려준다."""
+    tables = [r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")]
+    return {
+        'ready': 'items' in tables and 'sightings' in tables,
+        'db_path': db_path,
+        'tables': tables,
+        'items': conn.execute('SELECT COUNT(*) FROM items').fetchone()[0],
+        'sightings': conn.execute('SELECT COUNT(*) FROM sightings').fetchone()[0],
+    }
+
+
+def handle_init(conn, request_json, db_path):
+    """초기화 확인 요청을 처리한다. 반환: (success, response_json, message)"""
+    try:
+        payload = json.loads(request_json) if request_json.strip() else {}
+    except json.JSONDecodeError as e:
+        return False, '{}', f'JSON 파싱 실패: {e}'
+
+    who = payload.get('node', 'unknown')
+
+    try:
+        status = db_status(conn, db_path)
+    except sqlite3.Error as e:
+        return False, '{}', f'상태 확인 실패: {e}'
+
+    msg = (f"DB 준비됨 (items {status['items']}건, "
+           f"sightings {status['sightings']}건) / 요청자={who}")
+    return (status['ready'],
+            json.dumps(status, ensure_ascii=False),
+            msg if status['ready'] else '테이블이 준비되지 않았습니다')
+
+
 def handle_save(conn, request_json):
     """반환: (success, response_json, message)"""
     try:
@@ -225,18 +277,21 @@ class DBNode(Node):
 
         self.declare_parameter('db_path', '~/.ros/robot_db/robot.db')
         self.declare_parameter('require_init', False)
+        self.declare_parameter('allow_clear', True)   # 실서비스에서는 false 로
 
         raw_path = self.get_parameter('db_path').value
         self.db_path = os.path.abspath(os.path.expanduser(raw_path))
         self.require_init = self.get_parameter('require_init').value
+        self.allow_clear = self.get_parameter('allow_clear').value
 
         self.conn = None
         self.initialized = False
         self.setup_database()
 
-        self.create_service(Trigger, 'db/init', self.on_init)
+        self.create_service(NodeInit, 'db/init', self.on_init)
         self.create_service(DbSave, 'db/save', self.on_save)
         self.create_service(DbLoad, 'db/load', self.on_load)
+        self.create_service(Trigger, 'db/clear', self.on_clear)
 
         self.dump_tables()
         self.get_logger().info('DB 준비 완료 — 요청 대기 중')
@@ -268,12 +323,20 @@ class DBNode(Node):
 
     # ------------------------------------------------------------------
     def on_init(self, request, response):
-        """상태 노드의 초기화 요청에 응답한다."""
-        count = self.conn.execute('SELECT COUNT(*) FROM items').fetchone()[0]
-        self.initialized = True
-        response.success = True
-        response.message = f'DB 준비됨 (items {count}건)'
-        self.get_logger().info(f'[init] {response.message}')
+        """상태 노드의 초기화 확인 요청에 응답한다."""
+        success, data, message = handle_init(
+            self.conn, request.request, self.db_path)
+
+        response.success = success
+        response.response = data
+        response.message = message
+
+        # 준비가 확인된 경우에만 초기화 완료로 표시한다
+        if success:
+            self.initialized = True
+
+        log = self.get_logger().info if success else self.get_logger().error
+        log(f'[init] {message}')
         return response
 
     def _check_init(self, response):
@@ -315,6 +378,28 @@ class DBNode(Node):
 
         log = self.get_logger().info if success else self.get_logger().error
         log(f'[load] {message}')
+        return response
+
+    def on_clear(self, request, response):
+        """전체 삭제 — 테스트용. 되돌릴 수 없다."""
+        if not self.allow_clear:
+            response.success = False
+            response.message = '전체 삭제가 비활성화되어 있습니다 (allow_clear=false)'
+            self.get_logger().warn(f'[clear] 거절 — {response.message}')
+            return response
+
+        try:
+            n_items, n_sight = clear_all(self.conn)
+        except sqlite3.Error as e:
+            response.success = False
+            response.message = f'삭제 실패 — 롤백: {e}'
+            self.get_logger().error(f'[clear] {response.message}')
+            return response
+
+        response.success = True
+        response.message = f'전체 삭제 완료 (items {n_items}건, sightings {n_sight}건)'
+        self.get_logger().warn(f'[clear] {response.message}')
+        self.dump_tables()
         return response
 
     # ------------------------------------------------------------------
