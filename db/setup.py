@@ -24,7 +24,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'db = db.db:main'
+            'db = db.db:main',
+            'save_test = db.save_test_node:main',
         ],
     },
 )
