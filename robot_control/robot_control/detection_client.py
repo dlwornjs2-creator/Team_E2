@@ -1,53 +1,32 @@
-"""Request/response bridge for the future Any6D detector node."""
+"""ROS 2 service client for the Any6D detector node."""
 
 from __future__ import annotations
 
 import json
-import threading
 import time
+from typing import Any, Optional
 
 import rclpy
+from geometry_msgs.msg import PoseStamped
+from interfaces.srv import DetectObject
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy
-from std_msgs.msg import String
 
 from .config import SearchConfig
-from .models import RobotTask
+from .models import DetectionResult, RobotTask
 
 
 class DetectionClient:
-    """Publish targeted detection requests and wait for matching results."""
+    """Request target or landmark detection through one ROS 2 service."""
 
     def __init__(self, node: Node, config: SearchConfig) -> None:
         self.node = node
         self.config = config
-        self._lock = threading.Lock()
-        self._responses: dict[str, bool] = {}
-        qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
-        self.publisher = node.create_publisher(
-            String, config.detection_request_topic, qos
-        )
-        self.subscription = node.create_subscription(
-            String,
-            config.detection_result_topic,
-            self._on_result,
-            qos,
-        )
+        self.client = node.create_client(DetectObject, config.detection_service)
+        self._sequence = 0
 
-    def _on_result(self, message: String) -> None:
-        try:
-            payload = json.loads(message.data)
-            request_id = str(payload["request_id"]).strip()
-            detected = payload["detected"]
-            if not request_id or not isinstance(detected, bool):
-                raise ValueError("request_id와 boolean detected가 필요합니다")
-        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
-            self.node.get_logger().error(
-                f"Invalid Any6D detection result: {error}"
-            )
-            return
-        with self._lock:
-            self._responses[request_id] = detected
+    @property
+    def sequence(self) -> int:
+        return self._sequence
 
     def request_detection(
         self,
@@ -57,14 +36,18 @@ class DetectionClient:
         *,
         request_kind: str = "target",
         candidates: tuple[tuple[str, str], ...] = (),
-    ) -> bool:
+    ) -> DetectionResult:
+        if not self.client.wait_for_service(
+            timeout_sec=self.config.detection_service_wait_timeout_sec
+        ):
+            self.node.get_logger().warning(
+                f"Any6D service unavailable: {self.config.detection_service}"
+            )
+            return DetectionResult(False, None)
+
         suffix = "" if request_kind == "target" else f":{request_kind}"
         request_id = f"{task.task_id}:zone-{zone}{suffix}"
-        with self._lock:
-            self._responses.pop(request_id, None)
-
-        request = String()
-        payload = {
+        payload: dict[str, Any] = {
             "request_id": request_id,
             "request_type": request_kind,
             "task_id": task.task_id,
@@ -77,17 +60,82 @@ class DetectionClient:
                 {"name": name, "class_label": class_label}
                 for name, class_label in candidates
             ]
-        request.data = json.dumps(payload, ensure_ascii=False)
-        self.publisher.publish(request)
 
+        request = DetectObject.Request()
+        request.request = json.dumps(payload, ensure_ascii=False)
+        future = self.client.call_async(request)
         deadline = time.monotonic() + timeout_sec
-        while rclpy.ok() and time.monotonic() < deadline:
-            with self._lock:
-                if request_id in self._responses:
-                    return self._responses.pop(request_id)
-            rclpy.spin_once(self.node, timeout_sec=0.1)
+        while rclpy.ok() and not future.done() and time.monotonic() < deadline:
+            remaining = deadline - time.monotonic()
+            rclpy.spin_once(
+                self.node,
+                timeout_sec=min(0.1, max(0.0, remaining)),
+            )
 
-        self.node.get_logger().warning(
-            f"Any6D detection timeout: request_id={request_id}"
+        if not future.done():
+            future.cancel()
+            self.node.get_logger().warning(
+                f"Any6D service timeout: request_id={request_id}"
+            )
+            return DetectionResult(False, None)
+        if future.exception() is not None:
+            self.node.get_logger().error(
+                f"Any6D service failed: {future.exception()}"
+            )
+            return DetectionResult(False, None)
+
+        response = future.result()
+        if response is None or not response.success:
+            message = response.message if response else "empty response"
+            self.node.get_logger().warning(f"Any6D detection failed: {message}")
+            return DetectionResult(False, None)
+        return self._parse_response(response.response, request_id)
+
+    def _parse_response(self, raw: str, request_id: str) -> DetectionResult:
+        try:
+            payload = json.loads(raw) if raw else {}
+            detected = payload["detected"]
+            if not isinstance(detected, bool):
+                raise ValueError("detected must be boolean")
+            response_id = str(payload.get("request_id", request_id))
+            if response_id != request_id:
+                raise ValueError(
+                    f"request_id mismatch: {response_id} != {request_id}"
+                )
+            pose = self._parse_pose(payload.get("pose"))
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
+            self.node.get_logger().error(
+                f"Invalid Any6D service response: {error}"
+            )
+            return DetectionResult(False, None)
+
+        self._sequence += 1
+        return DetectionResult(
+            detected=detected,
+            pose=pose,
+            detected_name=str(payload.get("detected_name", "")),
+            detected_class_label=str(
+                payload.get("detected_class_label", "")
+            ),
         )
-        return False
+
+    def _parse_pose(self, data: Any) -> Optional[PoseStamped]:
+        if data is None:
+            return None
+        if not isinstance(data, dict):
+            raise ValueError("pose must be an object")
+        position = data.get("position", {})
+        orientation = data.get("orientation", {})
+        pose = PoseStamped()
+        pose.header.frame_id = str(data.get("frame_id", "base"))
+        stamp = data.get("stamp", {})
+        pose.header.stamp.sec = int(stamp.get("sec", 0))
+        pose.header.stamp.nanosec = int(stamp.get("nanosec", 0))
+        pose.pose.position.x = float(position["x"])
+        pose.pose.position.y = float(position["y"])
+        pose.pose.position.z = float(position["z"])
+        pose.pose.orientation.x = float(orientation["x"])
+        pose.pose.orientation.y = float(orientation["y"])
+        pose.pose.orientation.z = float(orientation["z"])
+        pose.pose.orientation.w = float(orientation["w"])
+        return pose

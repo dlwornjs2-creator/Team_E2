@@ -112,7 +112,7 @@ home_joint = (0.0, 0.0, 90.0, 0.0, 90.0, 180.0)
 enable_motion = True
 
 input_mode = "any6d"
-topic = "/any6d/object_pose_base"
+detection_service = "/any6d/detect"
 expected_base_frame = "base"
 pose_is_tcp_grasp = True
 ```
@@ -136,18 +136,18 @@ DB 조회 결과에 유효한 `location`이 없으면 다음 네 구역을 순�
 3. 조인트 `(6, 55, 43, -91, 96, 186)`
 4. 3구역에서 Base X 방향 `-290 mm`
 
-각 구역에 도착한 뒤 제어 노드는 미래의 Any6D 실행 노드에 다음 토픽으로
-탐지를 요청합니다.
+각 구역에 도착한 뒤 제어 노드는 Any6D 실행 노드의 서비스를 호출합니다.
 
 ```text
-/any6d/detection_request (std_msgs/msg/String)
+/any6d/detect (interfaces/srv/DetectObject)
 ```
 
-요청 JSON 예시:
+서비스의 `request` 문자열에 들어가는 목표물 요청 JSON 예시:
 
 ```json
 {
   "request_id": "pick-001:zone-2",
+  "request_type": "target",
   "task_id": "pick-001",
   "search_zone": 2,
   "name": "cup",
@@ -155,17 +155,22 @@ DB 조회 결과에 유효한 `location`이 없으면 다음 네 구역을 순�
 }
 ```
 
-Any6D 실행 노드는 같은 `request_id`를 사용해 다음 토픽에 결과를 발행해야
-합니다.
-
-```text
-/any6d/detection_result (std_msgs/msg/String)
-```
-
-탐지 성공 예시:
+탐지 성공 시 서비스 응답의 `success=true`와 함께 `response` 문자열에 다음
+JSON을 반환합니다. pose가 같은 응답에 포함되므로 별도 pose 토픽은 없습니다.
 
 ```json
-{"request_id":"pick-001:zone-2","detected":true}
+{
+  "request_id": "pick-001:zone-2",
+  "detected": true,
+  "detected_name": "cup",
+  "detected_class_label": "cup",
+  "pose": {
+    "frame_id": "base",
+    "stamp": {"sec": 0, "nanosec": 0},
+    "position": {"x": 367.289, "y": 8.193, "z": 35.476},
+    "orientation": {"x": -0.9999971, "y": -0.0024120, "z": -0.0000005, "w": 0.0000681}
+  }
+}
 ```
 
 탐지 실패 예시:
@@ -174,11 +179,8 @@ Any6D 실행 노드는 같은 `request_id`를 사용해 다음 토픽에 결과�
 {"request_id":"pick-001:zone-2","detected":false}
 ```
 
-`detected=true`인 경우 Any6D 노드는 기존
-`/any6d/object_pose_base` 토픽에도 해당 물체의 `PoseStamped`를 발행해야
-합니다. 제어 노드는 탐지 응답을 기본 10초, 자세를 추가로 5초 기다립니다.
-응답 또는 유효 자세가 없으면 다음 구역으로 이동합니다. 네 구역 모두 실패하면
-홈으로 돌아가 `not_found` 결과를 발행한 뒤 다음 요청을 기다립니다.
+제어 노드는 서비스 응답을 기본 10초 기다립니다. 응답 또는 유효 자세가 없으면
+다음 구역으로 이동합니다. 네 구역 모두 실패하면 홈으로 돌아갑니다.
 
 요청한 물체를 해당 구역에서 찾지 못했거나 유효한 pose를 받지 못하면, 다음
 구역으로 이동하기 전에 랜드마크 탐지를 한 번 더 요청합니다.
@@ -196,8 +198,8 @@ Any6D 실행 노드는 같은 `request_id`를 사용해 다음 토픽에 결과�
 }
 ```
 
-두 랜드마크 중 하나를 찾은 경우 탐지노드는 같은 `request_id`로
-`detected=true`를 반환합니다. 랜드마크 pose는 pick에 사용하지 않습니다.
+두 랜드마크 중 하나를 찾은 경우 서비스 응답 JSON에 같은 `request_id`와
+`detected=true`를 반환합니다. 랜드마크 응답에는 pose가 필요하지 않습니다.
 제어 노드는 발견 응답 후 현재 구역에서 3초 대기한 다음 다음 탐색구역으로
 이동합니다. 랜드마크도 찾지 못하면 별도 대기 없이 다음 구역으로 이동합니다.
 
@@ -355,12 +357,12 @@ ros2 topic pub --once /state/robot_request std_msgs/msg/String \
 현재 `location`은 로그와 결과 메시지에 포함되며, 로봇을 해당 장소로 이동시키는
 기능은 포함하지 않습니다.
 
-## Any6D 자세 계약
+## Any6D 서비스 자세 계약
 
-토픽:
+서비스:
 
 ```text
-/any6d/object_pose_base (geometry_msgs/msg/PoseStamped)
+/any6d/detect (interfaces/srv/DetectObject)
 ```
 
 요구 조건:
@@ -369,24 +371,11 @@ ros2 topic pub --once /state/robot_request std_msgs/msg/String \
 - 위치 단위는 **mm**
 - 방향은 로봇 Base 좌표계 기준 quaternion `(x, y, z, w)`
 - timestamp는 현재 시각 기준 0.5초 이내
-- 연속 3개 샘플이 안정적이어야 함
-- 샘플 간 위치 변화는 5 mm 이하
-- 샘플 간 회전 변화는 5° 이하
 - 기본 최소 Base Z는 2 mm
 
-ROS 표준 위치 단위는 m이지만 이 노드의 계약은 mm입니다. Any6D 발행 노드가
-m를 사용하면 반드시 발행 전에 mm로 변환하십시오.
-
-테스트 자세를 반복 발행하는 예시:
-
-```bash
-ros2 topic pub -r 10 /any6d/object_pose_base \
-  geometry_msgs/msg/PoseStamped \
-  "{header: {frame_id: base}, pose: {position: {x: 367.289, y: 8.193, z: 35.476}, orientation: {x: -0.9999971, y: -0.0024120, z: -0.0000005, w: 0.0000681}}}"
-```
-
-작업 요청보다 먼저 들어온 자세는 버려집니다. 작업 요청이 DB 조회를 통과한 뒤
-30초 안에 안정적인 새 자세가 들어와야 합니다.
+ROS 표준 위치 단위는 m이지만 이 서비스 계약은 mm입니다. Any6D 노드가 m를
+사용하면 서비스 응답을 만들기 전에 mm로 변환해야 합니다. `stamp`가 0이면
+수신 시각의 pose로 취급합니다.
 
 ## 결과 확인
 

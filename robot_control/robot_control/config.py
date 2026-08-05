@@ -66,10 +66,9 @@ class SearchConfig:
     zone4_base_x_mm: float = -290.0
     linear_vel: float = 30.0
     linear_acc: float = 60.0
-    detection_request_topic: str = "/any6d/detection_request"
-    detection_result_topic: str = "/any6d/detection_result"
+    detection_service: str = "/any6d/detect"
+    detection_service_wait_timeout_sec: float = 2.0
     detection_timeout_sec: float = 10.0
-    pose_timeout_sec: float = 5.0
     landmark_targets: tuple[tuple[str, str], ...] = (
         ("녹색 상자", "green_box"),
         ("회색 수납장", "gray_cabinet"),
@@ -80,13 +79,9 @@ class SearchConfig:
 @dataclass(frozen=True)
 class PoseConfig:
     input_mode: str = "any6d"
-    topic: str = "/any6d/object_pose_base"
     expected_base_frame: str = "base"
     min_depth_mm: float = 2.0
     max_age_sec: float = 0.5
-    required_stable_samples: int = 3
-    max_stable_position_delta_mm: float = 5.0
-    max_stable_rotation_delta_deg: float = 5.0
     pose_is_tcp_grasp: bool = True
     object_to_grasp_npy: str = ""
     wait_timeout_sec: float = 30.0

@@ -7,6 +7,7 @@ from enum import Enum
 from typing import Any, Optional
 
 import numpy as np
+from geometry_msgs.msg import PoseStamped
 
 
 class TaskOutcome(str, Enum):
@@ -43,6 +44,14 @@ class TargetPose:
     matrix: np.ndarray
     posx: list[float]
     source_sequence: int
+
+
+@dataclass(frozen=True)
+class DetectionResult:
+    detected: bool
+    pose: Optional[PoseStamped]
+    detected_name: str = ""
+    detected_class_label: str = ""
 
 
 @dataclass(frozen=True)

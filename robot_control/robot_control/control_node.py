@@ -98,11 +98,8 @@ class RobotControlNode(Node):
                 self.motion.holding_object if self.motion else False
             ),
             "target_input_mode": self.config.pose.input_mode,
-            "pose_topic": self.config.pose.topic,
             "db_service": self.config.interface.db_load_service,
-            "detection_request_topic": (
-                self.config.search.detection_request_topic
-            ),
+            "detection_service": self.config.search.detection_service,
         }
 
     def _acceptance_guard(self) -> Optional[str]:
@@ -171,10 +168,12 @@ class RobotControlNode(Node):
                     message=wait_message,
                     extra={"db": db_payload},
                 )
-                self.pose_provider.reset_for_task()
-                target = self.pose_provider.wait_for_target(
-                    self.config.pose.wait_timeout_sec
-                )
+                if self.config.pose.input_mode == "manual":
+                    target = self.pose_provider.wait_for_target(
+                        self.config.pose.wait_timeout_sec
+                    )
+                else:
+                    target = self._request_target_detection(task, 0)
                 not_found_message = (
                     f"{self.config.pose.wait_timeout_sec:.1f}초 동안 "
                     "유효한 Any6D 자세를 받지 못했습니다"
@@ -278,13 +277,8 @@ class RobotControlNode(Node):
                 extra={"db": db_payload, "search_zone": zone},
             )
             self.motion.move_to_search_zone(zone)
-            self.pose_provider.reset_for_task()
-            detected = self.detector.request_detection(
-                task,
-                zone,
-                self.config.search.detection_timeout_sec,
-            )
-            if not detected:
+            target = self._request_target_detection(task, zone)
+            if target is None:
                 self.state.publish_event(
                     task,
                     status="running",
@@ -294,20 +288,34 @@ class RobotControlNode(Node):
                     extra={"db": db_payload, "search_zone": zone},
                 )
             else:
-                target = self.pose_provider.wait_for_target(
-                    self.config.search.pose_timeout_sec
-                )
-                if target is not None:
-                    return target
-                self.get_logger().warning(
-                    f"Zone {zone}: detector reported found but no valid pose "
-                    "arrived"
-                )
+                return target
 
             self._observe_landmark(task, zone, db_payload)
 
         self.motion.move_home()
         return None
+
+    def _request_target_detection(
+        self,
+        task: RobotTask,
+        zone: int,
+    ) -> Optional[TargetPose]:
+        result = self.detector.request_detection(
+            task,
+            zone,
+            self.config.search.detection_timeout_sec,
+        )
+        if not result.detected:
+            return None
+        if result.pose is None:
+            self.get_logger().warning(
+                f"Zone {zone}: detector reported found without a pose"
+            )
+            return None
+        return self.pose_provider.target_from_pose(
+            result.pose,
+            self.detector.sequence,
+        )
 
     def _observe_landmark(
         self,
@@ -330,14 +338,14 @@ class RobotControlNode(Node):
                 "landmark_candidates": candidate_names,
             },
         )
-        found = self.detector.request_detection(
+        result = self.detector.request_detection(
             task,
             zone,
             self.config.search.detection_timeout_sec,
             request_kind="landmark",
             candidates=candidates,
         )
-        if not found:
+        if not result.detected:
             self.state.publish_event(
                 task,
                 status="running",
@@ -373,7 +381,8 @@ class RobotControlNode(Node):
         )
         if self.config.pose.input_mode == "any6d":
             self.get_logger().info(
-                f"Any6D pose topic: {self.config.pose.topic}"
+                f"Any6D detection service: "
+                f"{self.config.search.detection_service}"
             )
 
         while rclpy.ok():
