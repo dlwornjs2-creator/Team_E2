@@ -17,7 +17,8 @@ from components.panel import panel
 TABS = ["작업 기록", "물건 위치"]
 
 
-def build_log() -> ft.Control:
+def build_log(snapshot: dict | None = None) -> ft.Control:
+    # TODO: 이 화면은 아직 snapshot을 쓰지 않는다. "다음 작업 순서" 3번(화면 연결)에서 채운다.
     body = ft.Container(expand=True)
 
     def render(index: int):

@@ -15,6 +15,7 @@ __pycache__/
 .venv/
 venv/
 .env
+CLAUDE.md
 
 # ---- colcon (워크스페이스 루트에 생기지만 방어용) ----
 build/
