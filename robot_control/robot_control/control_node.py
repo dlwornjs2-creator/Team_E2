@@ -313,9 +313,16 @@ class RobotControlNode(Node):
                 f"Zone {zone}: detector reported found without a pose"
             )
             return None
+        if self.motion is None:
+            raise RuntimeError("Motion executor is not initialized")
+        base_tcp_posx = self.motion.current_tcp_posx()
+        self.get_logger().info(
+            f"Converting Any6D camera pose with current TCP: {base_tcp_posx}"
+        )
         return self.pose_provider.target_from_pose(
             result.pose,
             self.detector.sequence,
+            base_tcp_posx,
         )
 
     def _observe_landmark(

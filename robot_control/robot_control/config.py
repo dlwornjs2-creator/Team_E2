@@ -88,7 +88,20 @@ class SearchConfig:
 @dataclass(frozen=True)
 class PoseConfig:
     input_mode: str = "any6d"
-    expected_base_frame: str = "base"
+    accepted_camera_frames: tuple[str, ...] = (
+        "camera",
+        "camera_link",
+        "camera_color_optical_frame",
+    )
+    # /Downloads/T_gripper2camera.npy eye-in-hand calibration (2026-08-04).
+    # Rotation is unitless and translation is in millimetres.
+    tcp_to_camera: tuple[tuple[float, ...], ...] = (
+        (-0.999956248, 0.007801202, 0.005161742, 34.1555613),
+        (-0.007796429, -0.999969162, 0.000944147, 77.5664148),
+        (0.005168948, 0.000903863, 0.999986232, -227.496539),
+        (0.0, 0.0, 0.0, 1.0),
+    )
+    camera_position_scale_to_mm: float = 1000.0
     min_depth_mm: float = 2.0
     max_age_sec: float = 0.5
     pose_is_tcp_grasp: bool = True

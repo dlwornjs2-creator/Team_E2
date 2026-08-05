@@ -11,6 +11,7 @@ from geometry_msgs.msg import PoseStamped
 from rclpy.node import Node
 
 from .config import PoseConfig
+from .camera_transform import CameraToBaseTransformer
 from .models import PoseValidationError, TargetPose
 from .pose_utils import (
     drl_posx_to_matrix,
@@ -28,6 +29,7 @@ class PoseProvider(Protocol):
         self,
         message: PoseStamped,
         sequence: int,
+        base_tcp_posx: Optional[list[float]] = None,
     ) -> TargetPose:
         """Validate a detector-service pose and create a robot target."""
 
@@ -78,8 +80,9 @@ class ManualPoseProvider:
         self,
         message: PoseStamped,
         sequence: int,
+        base_tcp_posx: Optional[list[float]] = None,
     ) -> TargetPose:
-        del message, sequence
+        del message, sequence, base_tcp_posx
         raise RuntimeError("Any6D pose is unavailable in manual input mode")
 
 
@@ -95,6 +98,11 @@ class Any6DPoseProvider:
     ) -> None:
         self.node = node
         self.config = config
+        self._camera_to_base = CameraToBaseTransformer(
+            config.tcp_to_camera,
+            config.accepted_camera_frames,
+            config.camera_position_scale_to_mm,
+        )
         self._object_to_grasp = self._load_object_to_grasp(enable_motion)
 
     def _load_object_to_grasp(self, enable_motion: bool) -> np.ndarray:
@@ -123,14 +131,13 @@ class Any6DPoseProvider:
         self,
         message: PoseStamped,
         sequence: int,
+        base_tcp_posx: Optional[list[float]] = None,
     ) -> TargetPose:
-        expected = self.config.expected_base_frame
-        if expected and message.header.frame_id != expected:
+        if base_tcp_posx is None:
             raise PoseValidationError(
-                f"Rejected pose frame '{message.header.frame_id}'; "
-                f"expected '{expected}'"
+                "Current base-frame TCP pose is required for camera conversion"
             )
-        base_object = pose_stamped_to_matrix(message)
+        camera_object = pose_stamped_to_matrix(message)
         stamp_ns = (
             int(message.header.stamp.sec) * 1_000_000_000
             + int(message.header.stamp.nanosec)
@@ -143,6 +150,11 @@ class Any6DPoseProvider:
                 raise PoseValidationError(
                     f"Any6D pose is stale or time-invalid: age={age_sec:.3f}s"
                 )
+        base_object = self._camera_to_base.transform(
+            camera_object,
+            base_tcp_posx,
+            message.header.frame_id,
+        )
         if base_object[2, 3] < self.config.min_depth_mm:
             raise PoseValidationError(
                 f"Object Z={base_object[2, 3]:.2f}mm is below "

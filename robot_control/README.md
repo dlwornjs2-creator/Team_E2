@@ -166,7 +166,7 @@ JSON을 반환합니다. pose가 같은 응답에 포함되므로 별도 pose �
   "detected_name": "yellow_can",
   "detected_class_label": "yellow_can",
   "pose": {
-    "frame_id": "base",
+    "frame_id": "camera_color_optical_frame",
     "stamp": {"sec": 0, "nanosec": 0},
     "position": {"x": 367.289, "y": 8.193, "z": 35.476},
     "orientation": {"x": -0.9999971, "y": -0.0024120, "z": -0.0000005, "w": 0.0000681}
@@ -206,6 +206,21 @@ JSON을 반환합니다. pose가 같은 응답에 포함되므로 별도 pose �
 
 관련 값은 `SearchConfig`에서 변경할 수 있습니다. Any6D 실행 노드가 아직
 구현되지 않은 상태에서는 각 구역의 탐지 요청이 타임아웃으로 처리됩니다.
+
+탐지 노드가 반환하는 `pose`는 카메라 좌표계의 `T_camera_object`입니다.
+제어 노드는 탐지 순간의 현재 TCP 자세를 로봇에서 읽고 다음 순서로 Base 좌표로
+변환한 후 이동합니다.
+
+```text
+T_base_object = T_base_tcp × T_tcp_camera × T_camera_object
+```
+
+Any6D의 `T_camera_object` 위치는 m 단위로 받고 변환 과정에서 1000을 곱해
+mm로 변경합니다. `T_tcp_camera`는 `/Downloads/any6d_pose_to_base.py`와 함께
+검증된 `/Downloads/T_gripper2camera.npy`의 eye-in-hand 캘리브레이션 값이며
+`PoseConfig.tcp_to_camera`에 내장되어 있습니다. 허용 카메라 frame은 기본적으로 `camera`, `camera_link`,
+`camera_color_optical_frame`입니다. 실제 카메라 캘리브레이션 또는 frame 이름이
+다르면 실제모드 실행 전에 반드시 이 설정을 수정해야 합니다.
 
 탐지 노드에 전달하는 `object_name`은 다음 OBJ 식별자 중 하나이며 문자열을
 변환하지 않고 그대로 전달합니다: `yellow_can`, `green_box`, `gray_box`,
@@ -373,13 +388,14 @@ ros2 service call /control/task interfaces/srv/ControlTask \
 요구 조건:
 
 - `header.frame_id`는 `base`
-- 위치 단위는 **mm**
-- 방향은 로봇 Base 좌표계 기준 quaternion `(x, y, z, w)`
+- 탐지노드 입력 위치 단위는 **m**
+- 입력 방향은 카메라 좌표계 기준 quaternion `(x, y, z, w)`
+- 제어 노드가 현재 TCP 자세와 eye-in-hand 보정 행렬을 사용해 Base 좌표로 변환
 - timestamp는 현재 시각 기준 0.5초 이내
 - 기본 최소 Base Z는 2 mm
 
-ROS 표준 위치 단위는 m이지만 이 서비스 계약은 mm입니다. Any6D 노드가 m를
-사용하면 서비스 응답을 만들기 전에 mm로 변환해야 합니다. `stamp`가 0이면
+Any6D 서비스 응답의 위치는 m 단위이며 제어 노드가 Base 변환 과정에서 mm로
+변환합니다. `stamp`가 0이면
 수신 시각의 pose로 취급합니다.
 
 ## 결과 확인

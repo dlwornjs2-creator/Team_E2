@@ -133,7 +133,9 @@ class DetectionClient:
         position = data.get("position", {})
         orientation = data.get("orientation", {})
         pose = PoseStamped()
-        pose.header.frame_id = str(data.get("frame_id", "base"))
+        pose.header.frame_id = str(data.get("frame_id", "")).strip()
+        if not pose.header.frame_id:
+            raise ValueError("pose.frame_id is required")
         stamp = data.get("stamp", {})
         pose.header.stamp.sec = int(stamp.get("sec", 0))
         pose.header.stamp.nanosec = int(stamp.get("nanosec", 0))

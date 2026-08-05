@@ -63,6 +63,24 @@ class MotionExecutor:
         )
         self.dsr.mwait()
 
+    def current_tcp_posx(self) -> list[float]:
+        """Return the current TCP pose in the robot base frame."""
+        if not self.robot_config.enable_motion:
+            raise RuntimeError("Current TCP pose is unavailable in dry-run mode")
+        dr_base = getattr(self.dsr, "DR_BASE", 0)
+        result = self.dsr.get_current_posx(ref=dr_base)
+        if (
+            isinstance(result, (tuple, list))
+            and len(result) == 2
+            and hasattr(result[0], "__len__")
+        ):
+            pose = result[0]
+        else:
+            pose = result
+        if pose is None or len(pose) != 6:
+            raise RuntimeError(f"Invalid get_current_posx result: {result}")
+        return [float(value) for value in pose]
+
     def move_to_search_zone(self, zone: int) -> None:
         """Move to one of the four configured search viewpoints."""
         if zone not in {1, 2, 3, 4}:

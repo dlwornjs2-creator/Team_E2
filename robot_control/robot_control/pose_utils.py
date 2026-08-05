@@ -65,7 +65,7 @@ def drl_posx_to_matrix(pose: list[float]) -> np.ndarray:
 
 
 def pose_stamped_to_matrix(message: PoseStamped) -> np.ndarray:
-    """Reconstruct T_base_object from PoseStamped position and quaternion."""
+    """Reconstruct the frame-to-object transform from PoseStamped."""
     position = message.pose.position
     orientation = message.pose.orientation
     quaternion = np.array(
@@ -80,7 +80,7 @@ def pose_stamped_to_matrix(message: PoseStamped) -> np.ndarray:
     transform = np.eye(4, dtype=float)
     transform[:3, :3] = Rotation.from_quat(quaternion).as_matrix()
     transform[:3, 3] = [position.x, position.y, position.z]
-    return validate_homogeneous_matrix(transform, "T_base_object")
+    return validate_homogeneous_matrix(transform, "T_frame_object")
 
 
 def rotation_distance_deg(first: np.ndarray, second: np.ndarray) -> float:
