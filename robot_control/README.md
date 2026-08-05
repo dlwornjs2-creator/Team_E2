@@ -150,8 +150,9 @@ DB 조회 결과에 유효한 `location`이 없으면 다음 네 구역을 순�
   "request_type": "target",
   "task_id": "pick-001",
   "search_zone": 2,
-  "name": "cup",
-  "class_label": "cup"
+  "object_name": "yellow_can",
+  "name": "yellow_can",
+  "class_label": "yellow_can"
 }
 ```
 
@@ -162,8 +163,8 @@ JSON을 반환합니다. pose가 같은 응답에 포함되므로 별도 pose �
 {
   "request_id": "pick-001:zone-2",
   "detected": true,
-  "detected_name": "cup",
-  "detected_class_label": "cup",
+  "detected_name": "yellow_can",
+  "detected_class_label": "yellow_can",
   "pose": {
     "frame_id": "base",
     "stamp": {"sec": 0, "nanosec": 0},
@@ -192,8 +193,8 @@ JSON을 반환합니다. pose가 같은 응답에 포함되므로 별도 pose �
   "task_id": "pick-001",
   "search_zone": 2,
   "candidate_targets": [
-    {"name":"녹색 상자","class_label":"green_box"},
-    {"name":"회색 수납장","class_label":"gray_cabinet"}
+    {"object_name":"green_box","name":"green_box","class_label":"green_box"},
+    {"object_name":"gray_box","name":"gray_box","class_label":"gray_box"}
   ]
 }
 ```
@@ -205,6 +206,10 @@ JSON을 반환합니다. pose가 같은 응답에 포함되므로 별도 pose �
 
 관련 값은 `SearchConfig`에서 변경할 수 있습니다. Any6D 실행 노드가 아직
 구현되지 않은 상태에서는 각 구역의 탐지 요청이 타임아웃으로 처리됩니다.
+
+탐지 노드에 전달하는 `object_name`은 다음 OBJ 식별자 중 하나이며 문자열을
+변환하지 않고 그대로 전달합니다: `yellow_can`, `green_box`, `gray_box`,
+`white_bear`, `aircon_remote`, `green_frog`, `otter_in_can`.
 
 ## 실제 모드 실행
 

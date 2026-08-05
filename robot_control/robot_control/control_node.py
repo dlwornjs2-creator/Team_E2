@@ -48,6 +48,7 @@ class RobotControlNode(Node):
         self.state = StateInterface(
             self,
             config.interface,
+            supported_object_names=config.search.supported_object_names,
             status_supplier=self._status_payload,
             acceptance_guard=self._acceptance_guard,
         )
@@ -331,7 +332,7 @@ class RobotControlNode(Node):
             status="running",
             success=True,
             outcome=TaskOutcome.LANDMARK_SEARCHING,
-            message="녹색 상자 또는 회색 수납장을 탐지합니다",
+            message="green_box 또는 gray_box를 탐지합니다",
             extra={
                 "db": db_payload,
                 "search_zone": zone,

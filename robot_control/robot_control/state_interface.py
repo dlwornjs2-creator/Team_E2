@@ -26,11 +26,13 @@ class StateInterface:
         node: Node,
         config: InterfaceConfig,
         *,
+        supported_object_names: tuple[str, ...],
         status_supplier: StatusSupplier,
         acceptance_guard: AcceptanceGuard,
     ) -> None:
         self.node = node
         self.config = config
+        self.supported_object_names = supported_object_names
         self.status_supplier = status_supplier
         self.acceptance_guard = acceptance_guard
         self._ready = False
@@ -112,13 +114,20 @@ class StateInterface:
         class_label = str(payload.get("class_label") or "").strip()
         if not name and not class_label:
             raise ValueError("name(target_name) 또는 class_label이 필요합니다")
+        object_name = class_label or name
+        supported = self.supported_object_names
+        if object_name not in supported:
+            raise ValueError(
+                f"지원하지 않는 OBJ 이름: {object_name}; "
+                f"지원 목록: {', '.join(supported)}"
+            )
         task_id = str(payload.get("task_id") or "").strip()
         if not task_id:
             task_id = f"task-{self.node.get_clock().now().nanoseconds}"
         return RobotTask(
             task_id=task_id,
-            name=name,
-            class_label=class_label,
+            name=object_name,
+            class_label=object_name,
             requested_by=str(payload.get("requested_by", "state_node")).strip(),
             command=command,
         )

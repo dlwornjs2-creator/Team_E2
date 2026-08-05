@@ -47,17 +47,23 @@ class DetectionClient:
 
         suffix = "" if request_kind == "target" else f":{request_kind}"
         request_id = f"{task.task_id}:zone-{zone}{suffix}"
+        object_name = task.class_label or task.name
         payload: dict[str, Any] = {
             "request_id": request_id,
             "request_type": request_kind,
             "task_id": task.task_id,
             "search_zone": zone,
-            "name": task.name,
-            "class_label": task.class_label,
+            "object_name": object_name,
+            "name": object_name,
+            "class_label": object_name,
         }
         if candidates:
             payload["candidate_targets"] = [
-                {"name": name, "class_label": class_label}
+                {
+                    "object_name": class_label,
+                    "name": class_label,
+                    "class_label": class_label,
+                }
                 for name, class_label in candidates
             ]
 

@@ -54,6 +54,15 @@ class MotionConfig:
 
 @dataclass(frozen=True)
 class SearchConfig:
+    supported_object_names: tuple[str, ...] = (
+        "yellow_can",
+        "green_box",
+        "gray_box",
+        "white_bear",
+        "aircon_remote",
+        "green_frog",
+        "otter_in_can",
+    )
     zone2_base_x_mm: float = 250.0
     zone3_joint: tuple[float, ...] = (
         6.0,
@@ -70,8 +79,8 @@ class SearchConfig:
     detection_service_wait_timeout_sec: float = 2.0
     detection_timeout_sec: float = 10.0
     landmark_targets: tuple[tuple[str, str], ...] = (
-        ("녹색 상자", "green_box"),
-        ("회색 수납장", "gray_cabinet"),
+        ("green_box", "green_box"),
+        ("gray_box", "gray_box"),
     )
     landmark_dwell_sec: float = 3.0
 
