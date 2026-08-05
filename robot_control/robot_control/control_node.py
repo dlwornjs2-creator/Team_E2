@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any, Optional
 
 import rclpy
@@ -292,19 +293,71 @@ class RobotControlNode(Node):
                     message=f"탐색 {zone}구역에서 물체를 찾지 못했습니다",
                     extra={"db": db_payload, "search_zone": zone},
                 )
-                continue
+            else:
+                target = self.pose_provider.wait_for_target(
+                    self.config.search.pose_timeout_sec
+                )
+                if target is not None:
+                    return target
+                self.get_logger().warning(
+                    f"Zone {zone}: detector reported found but no valid pose "
+                    "arrived"
+                )
 
-            target = self.pose_provider.wait_for_target(
-                self.config.search.pose_timeout_sec
-            )
-            if target is not None:
-                return target
-            self.get_logger().warning(
-                f"Zone {zone}: detector reported found but no valid pose arrived"
-            )
+            self._observe_landmark(task, zone, db_payload)
 
         self.motion.move_home()
         return None
+
+    def _observe_landmark(
+        self,
+        task: RobotTask,
+        zone: int,
+        db_payload: dict[str, Any],
+    ) -> None:
+        """Look for configured landmarks after the requested target is absent."""
+        candidates = self.config.search.landmark_targets
+        candidate_names = [name for name, _ in candidates]
+        self.state.publish_event(
+            task,
+            status="running",
+            success=True,
+            outcome=TaskOutcome.LANDMARK_SEARCHING,
+            message="녹색 상자 또는 회색 수납장을 탐지합니다",
+            extra={
+                "db": db_payload,
+                "search_zone": zone,
+                "landmark_candidates": candidate_names,
+            },
+        )
+        found = self.detector.request_detection(
+            task,
+            zone,
+            self.config.search.detection_timeout_sec,
+            request_kind="landmark",
+            candidates=candidates,
+        )
+        if not found:
+            self.state.publish_event(
+                task,
+                status="running",
+                success=True,
+                outcome=TaskOutcome.LANDMARK_NOT_FOUND,
+                message="랜드마크를 찾지 못해 다음 탐색구역으로 이동합니다",
+                extra={"db": db_payload, "search_zone": zone},
+            )
+            return
+
+        dwell_sec = self.config.search.landmark_dwell_sec
+        self.state.publish_event(
+            task,
+            status="running",
+            success=True,
+            outcome=TaskOutcome.LANDMARK_FOUND,
+            message=f"랜드마크를 찾아 {dwell_sec:.1f}초 대기합니다",
+            extra={"db": db_payload, "search_zone": zone},
+        )
+        time.sleep(dwell_sec)
 
     def run(self) -> None:
         """

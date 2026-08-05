@@ -180,6 +180,27 @@ Any6D 실행 노드는 같은 `request_id`를 사용해 다음 토픽에 결과�
 응답 또는 유효 자세가 없으면 다음 구역으로 이동합니다. 네 구역 모두 실패하면
 홈으로 돌아가 `not_found` 결과를 발행한 뒤 다음 요청을 기다립니다.
 
+요청한 물체를 해당 구역에서 찾지 못했거나 유효한 pose를 받지 못하면, 다음
+구역으로 이동하기 전에 랜드마크 탐지를 한 번 더 요청합니다.
+
+```json
+{
+  "request_id": "pick-001:zone-2:landmark",
+  "request_type": "landmark",
+  "task_id": "pick-001",
+  "search_zone": 2,
+  "candidate_targets": [
+    {"name":"녹색 상자","class_label":"green_box"},
+    {"name":"회색 수납장","class_label":"gray_cabinet"}
+  ]
+}
+```
+
+두 랜드마크 중 하나를 찾은 경우 탐지노드는 같은 `request_id`로
+`detected=true`를 반환합니다. 랜드마크 pose는 pick에 사용하지 않습니다.
+제어 노드는 발견 응답 후 현재 구역에서 3초 대기한 다음 다음 탐색구역으로
+이동합니다. 랜드마크도 찾지 못하면 별도 대기 없이 다음 구역으로 이동합니다.
+
 관련 값은 `SearchConfig`에서 변경할 수 있습니다. Any6D 실행 노드가 아직
 구현되지 않은 상태에서는 각 구역의 탐지 요청이 타임아웃으로 처리됩니다.
 

@@ -70,6 +70,11 @@ class SearchConfig:
     detection_result_topic: str = "/any6d/detection_result"
     detection_timeout_sec: float = 10.0
     pose_timeout_sec: float = 5.0
+    landmark_targets: tuple[tuple[str, str], ...] = (
+        ("녹색 상자", "green_box"),
+        ("회색 수납장", "gray_cabinet"),
+    )
+    landmark_dwell_sec: float = 3.0
 
 
 @dataclass(frozen=True)

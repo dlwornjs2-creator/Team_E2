@@ -54,22 +54,30 @@ class DetectionClient:
         task: RobotTask,
         zone: int,
         timeout_sec: float,
+        *,
+        request_kind: str = "target",
+        candidates: tuple[tuple[str, str], ...] = (),
     ) -> bool:
-        request_id = f"{task.task_id}:zone-{zone}"
+        suffix = "" if request_kind == "target" else f":{request_kind}"
+        request_id = f"{task.task_id}:zone-{zone}{suffix}"
         with self._lock:
             self._responses.pop(request_id, None)
 
         request = String()
-        request.data = json.dumps(
-            {
-                "request_id": request_id,
-                "task_id": task.task_id,
-                "search_zone": zone,
-                "name": task.name,
-                "class_label": task.class_label,
-            },
-            ensure_ascii=False,
-        )
+        payload = {
+            "request_id": request_id,
+            "request_type": request_kind,
+            "task_id": task.task_id,
+            "search_zone": zone,
+            "name": task.name,
+            "class_label": task.class_label,
+        }
+        if candidates:
+            payload["candidate_targets"] = [
+                {"name": name, "class_label": class_label}
+                for name, class_label in candidates
+            ]
+        request.data = json.dumps(payload, ensure_ascii=False)
         self.publisher.publish(request)
 
         deadline = time.monotonic() + timeout_sec
