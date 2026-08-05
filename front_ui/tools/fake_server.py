@@ -29,7 +29,21 @@ START = time.time()
 
 STAGE_CODES = L.STAGE_ORDER  # idle ... done, 명세 6장 순서 그대로
 STAGE_DURATION = 4.0  # 각 단계에 머무는 시간(초). 데모 속도 조절용.
-DRAWER_PERIOD = 10.0  # 서랍 open_ratio 가 0->1->0 왕복하는 주기(초)
+
+# 로봇 팔(M0609) 링크별 위치/자세. 실제 관절 각도가 없어서(back_ui가 아직
+# 없다) 전부 0도일 때의 자세를 URDF 조인트 원점들을 이어붙여 미리 계산해
+# 넣었다 — 다 펴진 채로 위를 향하는 자세라 실제 동작 모습은 아니지만,
+# tools/mesh_to_points.py로 만든 점군이 base_link 기준으로 잘 배치되는지
+# 확인하기엔 충분하다. 값 그대로 쓰지 말고 back_ui가 실제 FK로 갈아끼운다.
+ROBOT_LINKS_ZERO_POSE = [
+    {"name": "base_link", "pos": [0.0, 0.0, 0.0], "rpy": [0.0, 0.0, 0.0]},
+    {"name": "link_1", "pos": [0.0, 0.0, 0.1345], "rpy": [0.0, 0.0, 0.0]},
+    {"name": "link_2", "pos": [0.0, 0.006, 0.1345], "rpy": [3.1416, -1.5706, 1.5706]},
+    {"name": "link_3", "pos": [0.0, 0.0061, 0.5455], "rpy": [-1.571, 0.0002, -0.0002]},
+    {"name": "link_4", "pos": [0.0001, 0.0062, 0.9135], "rpy": [0.0, 0.0002, -0.0002]},
+    {"name": "link_5", "pos": [0.0001, 0.0062, 0.9135], "rpy": [-1.571, 0.0002, -0.0002]},
+    {"name": "link_6", "pos": [0.0001, 0.0062, 1.0345], "rpy": [0.0, 0.0002, -0.0002]},
+]
 
 
 def _stage_progress(elapsed: float) -> tuple[str, float]:
@@ -43,27 +57,9 @@ def _stage_progress(elapsed: float) -> tuple[str, float]:
     return STAGE_CODES[idx], pos - idx * STAGE_DURATION
 
 
-def _drawer_open_ratio(elapsed: float) -> float:
-    """0 -> 1 -> 0 삼각파.
-
-    시작과 끝만 바뀌면 서랍이 순간이동하듯 보인다는 명세 6장 요구사항 때문에,
-    가짜 서버에서도 중간값이 계속 갱신되게 한다.
-    """
-    pos = (elapsed % DRAWER_PERIOD) / DRAWER_PERIOD
-    return round(1.0 - abs(1.0 - 2 * pos), 3)
-
-
 def build_snapshot() -> dict:
     elapsed = time.time() - START
     stage, stage_elapsed = _stage_progress(elapsed)
-    open_ratio = _drawer_open_ratio(elapsed)
-    opening = _drawer_open_ratio(elapsed + 0.05) > open_ratio
-    if open_ratio <= 0.02:
-        zone_state = "closed"
-    elif open_ratio >= 0.98:
-        zone_state = "open"
-    else:
-        zone_state = "opening" if opening else "closing"
 
     return {
         "ts": time.time(),
@@ -108,16 +104,35 @@ def build_snapshot() -> dict:
                 "status": "unknown", "confidence": None,
                 "last_seen": "2026-08-04T11:40:00",
             },
-        ],
-        "zones": [
+            # 3D 지도에 마커 여러 개 찍히는 모양 보려고 대충 선반 위에 흩어놓은
+            # 더미 물체들. 정확한 실측 위치 아님 — scene_config.json의 shelf
+            # 박스(pos=[-0.48,-0.32,0.12], size=[0.30,1.00,0.24]) 윗면(z=0.24)
+            # 근처에 대충 얹었다.
             {
-                "id": "drawer_a_2", "name": "Drawer A-2", "type": "drawer",
-                "pos": [0.40, 0.10, 0.20], "size": [0.30, 0.40, 0.12],
-                "open_axis": [1.0, 0.0, 0.0],
-                "state": zone_state, "open_ratio": open_ratio,
-                "search_state": "observing",
+                "id": "mug_01", "name": "머그컵", "category": "cup",
+                "pos": [-0.48, -0.10, 0.27], "zone": None,
+                "status": "confirmed", "confidence": 0.88,
+                "last_seen": "2026-08-05T09:00:00",
+            },
+            {
+                "id": "tape_01", "name": "테이프", "category": "misc",
+                "pos": [-0.55, 0.05, 0.26], "zone": None,
+                "status": "searching", "confidence": None,
+                "last_seen": "2026-08-05T09:01:00",
+            },
+            {
+                "id": "cable_01", "name": "케이블", "category": "misc",
+                "pos": [-0.40, -0.35, 0.26], "zone": None,
+                "status": "warning", "confidence": 0.4,
+                "last_seen": "2026-08-05T09:02:00",
             },
         ],
+        # zones는 아직 실측 위치가 없다 (수납장/박스처럼 실제 치수를 받기 전까지는
+        # 임의로 안 채운다 — 명세 문서의 예시값을 그대로 쓴 더미였다). 실측값이
+        # 오면 여기에 넣는다. MapView의 zones 렌더링 코드(render3d/map_view.py)는
+        # 그대로 둔다 — 데이터가 비어있으면 그냥 아무것도 안 그린다.
+        "zones": [],
+        "robot": {"links": ROBOT_LINKS_ZERO_POSE},
         "recent_tasks": [
             {
                 "task_id": "task_20260804_001", "target_name": "빨간 컵",

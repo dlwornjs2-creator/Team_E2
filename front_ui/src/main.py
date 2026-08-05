@@ -14,7 +14,7 @@ from client.state_client import (
     STATUS_DISCONNECTED,
 )
 from views.home_view import HomeView
-from views.monitor_view import build_monitor
+from views.monitor_view import MonitorView
 from views.log_view import build_log
 
 
@@ -34,7 +34,7 @@ class _StaticView:
 
 PAGES = [
     ("홈", ft.Icons.HOME_OUTLINED, ft.Icons.HOME, HomeView),
-    ("작업", ft.Icons.VISIBILITY_OUTLINED, ft.Icons.VISIBILITY, lambda: _StaticView(build_monitor())),
+    ("작업", ft.Icons.VISIBILITY_OUTLINED, ft.Icons.VISIBILITY, MonitorView),
     ("로그", ft.Icons.LIST_ALT_OUTLINED, ft.Icons.LIST_ALT, lambda: _StaticView(build_log())),
 ]
 

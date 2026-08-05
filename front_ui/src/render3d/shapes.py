@@ -4,8 +4,8 @@
 좌표를 `flet.canvas` 도형으로 바꾸는 역할만 한다 — 좌표 계산 자체는 여기
 없다.
 
-지금 단계(구현 순서 1~3)에서는 draw_grid / draw_axes / draw_points만 있으면
-된다. draw_box_wire / draw_marker는 zones·objects를 그리는 4~6단계에서 추가한다.
+4단계: draw_box_wire (책상/벽/선반처럼 고정된 상자). draw_marker(물체 라벨)는
+6단계에서 추가한다.
 """
 
 import flet as ft
@@ -14,6 +14,29 @@ import numpy as np
 
 import theme as t
 from render3d.projection import Camera, project
+
+# 큐브 8개 꼭짓점의 부호 조합. sx>>2, sy>>1, sz 순서 비트로 인덱스가 매겨진다
+# (아래 _BOX_EDGES가 이 순서를 전제로 한다).
+_BOX_SIGNS = np.array(
+    [[sx, sy, sz] for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)], dtype=float
+)
+# 꼭짓점 인덱스가 1비트만 다른 쌍 = 큐브의 모서리 12개.
+_BOX_EDGES = [
+    (0, 1), (0, 2), (0, 4), (1, 3), (1, 5), (2, 3),
+    (2, 6), (3, 7), (4, 5), (4, 6), (5, 7), (6, 7),
+]
+
+
+def rpy_matrix(rpy) -> np.ndarray:
+    """roll(x)-pitch(y)-yaw(z) 오일러각 -> 3x3 회전행렬. XYZ 순서로 곱한다."""
+    roll, pitch, yaw = rpy
+    cr, sr = np.cos(roll), np.sin(roll)
+    cp, sp = np.cos(pitch), np.sin(pitch)
+    cy, sy = np.cos(yaw), np.sin(yaw)
+    rx = np.array([[1, 0, 0], [0, cr, -sr], [0, sr, cr]])
+    ry = np.array([[cp, 0, sp], [0, 1, 0], [-sp, 0, cp]])
+    rz = np.array([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]])
+    return rz @ ry @ rx
 
 
 def draw_grid(shapes: list, floor_cfg: dict, cam: Camera) -> None:
@@ -73,11 +96,72 @@ def draw_axes(shapes: list, cam: Camera, length: float = 0.10) -> None:
         )
 
 
+def draw_box_wire(
+    shapes: list,
+    center,
+    size,
+    cam: Camera,
+    color: str,
+    rpy=None,
+    width: float = 1.0,
+) -> None:
+    """직육면체를 와이어프레임으로. 꼭짓점 8개를 투영하고 모서리 12개를 잇는다.
+
+    채운 면 대신 와이어프레임을 쓰는 이유(명세 6장): 채우면 서랍 안 물체나
+    로봇 팔이 가려지고, painter's algorithm 특성상 팔이 상자를 관통할 때
+    앞뒤가 틀리게 나온다. 와이어프레임은 두 문제가 동시에 없어진다.
+    """
+    center = np.asarray(center, dtype=float)
+    half = np.asarray(size, dtype=float) / 2
+    local = _BOX_SIGNS * half  # (8,3)
+    if rpy is not None:
+        local = local @ rpy_matrix(rpy).T
+
+    verts = local + center
+    proj = project(verts, cam)  # (8,3) [x,y,depth]
+
+    paint = ft.Paint(color=color, stroke_width=width)
+    for a, b in _BOX_EDGES:
+        shapes.append(
+            cv.Line(proj[a, 0], proj[a, 1], proj[b, 0], proj[b, 1], paint=paint)
+        )
+
+
 def draw_robot_marker(shapes: list, cam: Camera, color: str = t.ROBOT, radius: float = 7.0) -> None:
     """로봇 위치(=원점, base_link) 표시. 링크 포인트 클라우드가 붙기 전까지는
     이 큰 점 하나가 로봇 자리다."""
     origin = project(np.array([[0.0, 0.0, 0.0]]), cam)[0]
     shapes.append(cv.Circle(float(origin[0]), float(origin[1]), radius, paint=ft.Paint(color=color)))
+
+
+_MARKER_MIN_R, _MARKER_MAX_R = 3.0, 6.0
+# 이 정도 깊이 차이(m)면 반지름이 최소~최대로 다 벌어지게. 씬 크기(바닥판
+# 대각선 ~1.3m)에 맞춘 임의 값이라 정확한 눈금은 아니고, "가까울수록 커
+# 보인다" 정도의 원근감 힌트만 준다(명세 6장 draw_marker).
+_MARKER_DEPTH_SPAN = 1.0
+
+
+def draw_marker(shapes: list, pos, cam: Camera, color: str) -> None:
+    """물체 위치 점 하나. 라벨은 별도(draw_label) — 명세 8장대로 라벨은
+    맨 마지막에 한 번 더 돌면서 그린다(점에 가려지지 않게)."""
+    proj = project(np.array([pos], dtype=float), cam)[0]
+    depth = proj[2]
+    t_norm = np.clip(0.5 - depth / _MARKER_DEPTH_SPAN, 0.0, 1.0)  # 가까울수록(depth 작을수록) 1에 가깝게
+    radius = _MARKER_MIN_R + t_norm * (_MARKER_MAX_R - _MARKER_MIN_R)
+    shapes.append(cv.Circle(float(proj[0]), float(proj[1]), radius, paint=ft.Paint(color=color)))
+
+
+def draw_label(shapes: list, pos, cam: Camera, text: str, color: str) -> None:
+    """물체 이름 라벨. 점 옆에 살짝 띄워서 겹치지 않게."""
+    proj = project(np.array([pos], dtype=float), cam)[0]
+    shapes.append(
+        cv.Text(
+            float(proj[0]) + 8,
+            float(proj[1]) - 6,
+            text,
+            style=ft.TextStyle(size=11, color=color),
+        )
+    )
 
 
 def draw_points(shapes: list, points_3d: np.ndarray, cam: Camera, color: str, radius: float = 1.2) -> None:

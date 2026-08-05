@@ -21,6 +21,10 @@ class Camera:
     pitch: float = 0.5  # 라디안. 위에서 내려다보는 각도. 0이면 정면, 커질수록 위에서
     scale: float = 300.0  # 픽셀 / 미터
     center: tuple[float, float] = (0.0, 0.0)  # 화면 중심 픽셀 좌표
+    pivot: tuple[float, float, float] = (0.0, 0.0, 0.0)  # 회전축(base_link 좌표)
+    # 원점(로봇)은 장면 한쪽 구석이라, 원점 기준으로 돌리면 선반/수납장/박스가
+    # 화면 밖으로 휙 나갔다 들어온다. 장면 중앙 쯤을 pivot으로 주면 그 자리에
+    # 고정된 채로 도는 것처럼 보여서 보기 편하다.
 
     def matrix(self) -> np.ndarray:
         """yaw(z축 회전) 다음 pitch(x축 회전) 순서로 곱한 3x3 회전행렬."""
@@ -41,8 +45,11 @@ def project(points_3d: np.ndarray, cam: Camera) -> np.ndarray:
     처리한다. 점 하나씩 도는 반복문은 링크 점 수천 개에서 느려진다.
     """
     pts = np.asarray(points_3d, dtype=float).reshape(-1, 3)
+    pivot = np.asarray(cam.pivot, dtype=float)
     r = cam.matrix()
-    rotated = pts @ r.T  # (N,3)
+    # pivot을 원점으로 옮겨서 돌린 뒤 도로 더한다 — pivot 자기 자신은
+    # (pts-pivot)이 0이라 회전과 무관하게 항상 같은 자리에 투영된다.
+    rotated = (pts - pivot) @ r.T + pivot  # (N,3)
 
     x_px = cam.center[0] + rotated[:, 0] * cam.scale
     y_px = cam.center[1] - rotated[:, 2] * cam.scale  # 화면 y는 아래로 증가 -> z 뒤집기

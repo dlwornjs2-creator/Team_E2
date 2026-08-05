@@ -115,30 +115,47 @@ front_ui/
 │   │   └── object_viewer.py      완료 — 드래그 회전 3D 물체 뷰어
 │   ├── views/
 │   │   ├── home_view.py          진행 중 — 4개 패널 실데이터 연결(현재 작업/
-│   │   │                          시스템 상태/3d 모델/3D 맵), "최근 실행 경과"만 남음
-│   │   ├── monitor_view.py        레이아웃만, 데이터 미연결. STAGES 목록이
-│   │   │                          labels.py와 중복 정의돼 있음 (정리 필요)
+│   │   │                          시스템 상태/3d 모델/3D 맵), "최근 실행 경과"만 남음.
+│   │   │                          3D 맵은 show_robot=True — 작업 화면과 같은 내용
+│   │   ├── monitor_view.py        진행 중 — "3D 지도"만 실데이터 연결(show_robot=
+│   │   │                          True, 홈과 같은 내용). 나머지 4개 패널은 아직
+│   │   │                          자리만. STAGES 목록이 labels.py와 중복 정의돼
+│   │   │                          있음 (정리 필요)
 │   │   └── log_view.py            레이아웃만, 데이터 미연결
 │   ├── render3d/
-│   │   ├── projection.py         완료 — Camera, project(). numpy 검증: 3000점
-│   │   │                          0.05ms/프레임
-│   │   ├── shapes.py              진행 중 — draw_grid/draw_axes/draw_points/
-│   │   │                          draw_robot_marker 있음. draw_box_wire/
-│   │   │                          draw_marker(물체 라벨)는 아직
-│   │   ├── map_view.py            진행 중 — 마우스 회전·줌·리셋 되는 MapView.
-│   │   │                          zones/objects 실데이터 연결 전, build_map()
-│   │   │                          (snapshot 받는 최종 형태)도 아직
+│   │   ├── projection.py         완료 — Camera(pivot 포함), project(). numpy
+│   │   │                          검증: 3000점 0.05ms/프레임
+│   │   ├── shapes.py              완료 — draw_grid/draw_axes/draw_points/
+│   │   │                          draw_box_wire/draw_marker/draw_label. rpy_matrix는
+│   │   │                          robot_points.py와 공유(공개 함수로 변경함)
+│   │   ├── map_view.py            완료 — 마우스 회전·줌·리셋(+오른쪽 드래그로
+│   │   │                          피벗 패닝) 되는 MapView. zones/objects/robot_links
+│   │   │                          다 연결됨. show_robot 플래그로 화면별 로봇 표시
+│   │   │                          여부 결정. build_map()(snapshot 받는 함수 하나로
+│   │   │                          통합)은 아직 — HomeView/MonitorView가 각자 부름
+│   │   ├── robot_points.py        완료 — assets/robot/*.npy 로딩·캐싱, robot.links의
+│   │   │                          pos/rpy로 배치해서 하나의 배열로 합침. base_link
+│   │   │                          정면축이 90도 어긋나 있어서 위에서 봤을 때
+│   │   │                          시계방향 90도(z축 -90도) 고정 보정 추가함 —
+│   │   │                          관절 각도와 무관한 고정 오차라 팔이 움직여도 유효
 │   │   └── scene.py               완료 — scene_config.json 로더
 │   └── assets/
-│       ├── scene_config.json     바닥판만 있음 (책상/벽 boxes는 빈 배열)
+│       ├── scene_config.json     바닥판 + 선반/수납장/박스 (mm 단위 실측값은
+│       │                          m로 변환해서 넣음. 수납장·박스는 선반 위/
+│       │                          옆, 로봇 반대편 끝에 배치)
 │       ├── models/cup_red_01.obj  드래그 뷰어용 데모 mesh (개구리)
-│       └── renders/cup_red_01.png 정적 렌더 폴백 (뷰어 우선순위상 지금 안 쓰임)
+│       ├── renders/cup_red_01.png 정적 렌더 폴백 (뷰어 우선순위상 지금 안 쓰임)
+│       └── robot/*.npy           M0609 링크별 점군(7개). tools/mesh_to_points.py로
+│                                  생성 — mesh(.dae) 원본이 바뀌면 다시 돌려야 함
 └── tools/
     ├── fake_server.py          완료 — 명세 스키마 그대로, stage/open_ratio가
-    │                            시간에 따라 실제로 움직임. /frame.jpg는 501 스텁
+    │                            시간에 따라 실제로 움직임. robot.links는 M0609
+    │                            0도 자세(고정값, 실제 FK 아님). /frame.jpg는 501 스텁
     ├── render_object.py         완료 — OBJ → PNG 오프라인 사전렌더 (지금은
     │                            안 씀, OBJ 없는 물체용 폴백 경로로 남겨둠)
-    └── mesh_to_points.py        미착수 — 로봇 팔 포인트클라우드용 (구현 순서 7번)
+    └── mesh_to_points.py        완료 — doosan-robot2 M0609 mesh(.dae) 22513개
+                                  꼭짓점 -> assets/robot/*.npy 5000개로 축소.
+                                  모델 바뀌면 파일 상단 MODEL/LINKS만 고치면 됨
 
 back_ui/                       미착수 (ROS 노드 전체)
 ```
@@ -152,6 +169,7 @@ back_ui/                       미착수 (ROS 노드 전체)
 | `ft.Image(src="renders/xxx.png")`가 `src/assets/` 기준 상대경로로 해석됨 | `home_view.py` | 렌더 PNG 폴백 경로가 안 뜰 수 있음 (지금은 OBJ 뷰어가 우선이라 실제로는 안 씀) |
 | scene_config 바닥판 방향: 64cm=전방(x), 120cm=좌우(y), 로봇이 왼쪽 변에서 28cm/뒤쪽 변에서 33cm | `assets/scene_config.json` | 3D 지도에서 바닥판·로봇 위치가 실제와 다르게 보임. `pos`/`size` 부호만 바꾸면 됨 |
 | Flet 데스크톱/웹 모드 모두에서 `cv.Points`, `GestureDetector.on_scroll/on_double_tap` 동작 | `render3d/map_view.py` | 사용자가 직접 `flet run`으로 확인 중 |
+| `mesh_to_points.py`의 COLLADA(.dae) node 변환행렬 적용이 맞음 — 링크별 점군 bbox 크기(예: link_2 x축 0.547m ≈ URDF joint_3 origin의 0.411m와 얼추 맞음)로 숫자상 정합성만 확인했고 화면에 실제로 띄워서 로봇 팔 모양이 맞는지는 못 봄 | `tools/mesh_to_points.py`, `assets/robot/*.npy` | 팔 모양이 이상하게 보이면 node matrix 적용 순서(스케일 전/후)를 의심할 것 |
 
 ---
 
@@ -167,15 +185,24 @@ back_ui/                       미착수 (ROS 노드 전체)
 
 ## 6. 다음 순서
 
-`docs/3d_map_spec.md` 13장 기준, 지금 3~4단계 사이:
+`docs/3d_map_spec.md` 13장 기준:
 
 1. ~~`projection.py` + 성능 측정~~ 완료
 2. ~~`draw_grid` + `draw_axes`~~ 완료 (+ 로봇 마커도 추가함, 명세엔 없던 것)
-3. ~~마우스 회전·줌~~ 완료
-4. **`draw_box_wire` + `scene_config.json`의 책상/벽** ← 다음
-5. `zones` 렌더링 + 서랍 열림 (`open_ratio` 연속 반영)
-6. `objects` 마커 + 라벨
-7. `mesh_to_points.py` + 로봇 팔 (draw_points로, Circle 아니고 Points로 처음부터)
+3. ~~마우스 회전·줌~~ 완료 (+ 오른쪽 드래그로 피벗 이동/패닝 추가함, 명세엔 없던 것)
+4. ~~`draw_box_wire` + `scene_config.json`의 책상/벽~~ 완료 (선반/수납장/박스)
+5. ~~`zones` 렌더링 + 서랍 열림~~ 완료 (지금은 `fake_server`의 zones가 빈 배열이라 실제로 그려지는 건 없음 — 실측 데이터 들어오면 바로 보임)
+6. ~~`objects` 마커 + 라벨~~ 완료 — `pos`가 없는(위치 불명) 물체는 건너뜀
+7. ~~`mesh_to_points.py` + 로봇 팔~~ 완료. 모델은 **M0609**(사용자 확인).
+   doosan-robot2 M0609 mesh 22513개 꼭짓점 -> 5000개로 축소해 링크별 .npy로
+   저장(`assets/robot/`), `robot_points.py`가 로딩+배치, `map_view.py`가
+   draw_points 한 번으로 합쳐서 그림(링크마다 따로 안 그림 — 도형 개수 안
+   늘리려고). `MapView`에 `show_robot` 플래그 추가: 홈=False, 작업(monitor)=
+   True. `monitor_view.py`를 `build_monitor()` 함수에서 `MonitorView`
+   클래스로 바꿔서 "3D 지도"만 실데이터를 받게 했다(나머지 4패널은 그대로
+   자리만). `fake_server.py`의 `robot.links`는 실제 FK가 아니라 M0609
+   URDF 조인트 원점을 0도 자세로 이어붙인 고정값(다 펴진 자세) — back_ui가
+   생기면 진짜 FK 값으로 대체된다.
 
-그 다음: 작업(monitor) 화면에 실데이터 연결, 로그 화면 구현, `back_ui` 실제
-ROS 노드 구현.
+그 다음: 작업(monitor) 화면 나머지 4패널(카메라/판단·행동/실행 단계/작업
+정보) 실데이터 연결, 로그 화면 구현, `back_ui` 실제 ROS 노드 구현.
