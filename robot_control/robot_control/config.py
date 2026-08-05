@@ -53,6 +53,26 @@ class MotionConfig:
 
 
 @dataclass(frozen=True)
+class SearchConfig:
+    zone2_base_x_mm: float = 250.0
+    zone3_joint: tuple[float, ...] = (
+        6.0,
+        55.0,
+        43.0,
+        -91.0,
+        96.0,
+        186.0,
+    )
+    zone4_base_x_mm: float = -290.0
+    linear_vel: float = 30.0
+    linear_acc: float = 60.0
+    detection_request_topic: str = "/any6d/detection_request"
+    detection_result_topic: str = "/any6d/detection_result"
+    detection_timeout_sec: float = 10.0
+    pose_timeout_sec: float = 5.0
+
+
+@dataclass(frozen=True)
 class PoseConfig:
     input_mode: str = "any6d"
     topic: str = "/any6d/object_pose_base"
@@ -83,6 +103,7 @@ class AppConfig:
     robot: RobotConfig = field(default_factory=RobotConfig)
     gripper: GripperConfig = field(default_factory=GripperConfig)
     motion: MotionConfig = field(default_factory=MotionConfig)
+    search: SearchConfig = field(default_factory=SearchConfig)
     pose: PoseConfig = field(default_factory=PoseConfig)
     interface: InterfaceConfig = field(default_factory=InterfaceConfig)
 

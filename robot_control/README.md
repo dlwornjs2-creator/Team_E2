@@ -127,6 +127,62 @@ enable_motion = False
 사용합니다. Any6D가 물체 중심 자세를 발행한다면 이를 `False`로 변경하고
 `object_to_grasp_npy`에 `T_object_grasp` 4×4 행렬 파일을 지정해야 합니다.
 
+## DB 미등록 물체 탐색
+
+DB 조회 결과에 유효한 `location`이 없으면 다음 네 구역을 순서대로 탐색합니다.
+
+1. 홈 조인트 `(0, 0, 90, 0, 90, 180)`
+2. 1구역에서 Base X 방향 `+250 mm`
+3. 조인트 `(6, 55, 43, -91, 96, 186)`
+4. 3구역에서 Base X 방향 `-290 mm`
+
+각 구역에 도착한 뒤 제어 노드는 미래의 Any6D 실행 노드에 다음 토픽으로
+탐지를 요청합니다.
+
+```text
+/any6d/detection_request (std_msgs/msg/String)
+```
+
+요청 JSON 예시:
+
+```json
+{
+  "request_id": "pick-001:zone-2",
+  "task_id": "pick-001",
+  "search_zone": 2,
+  "name": "cup",
+  "class_label": "cup"
+}
+```
+
+Any6D 실행 노드는 같은 `request_id`를 사용해 다음 토픽에 결과를 발행해야
+합니다.
+
+```text
+/any6d/detection_result (std_msgs/msg/String)
+```
+
+탐지 성공 예시:
+
+```json
+{"request_id":"pick-001:zone-2","detected":true}
+```
+
+탐지 실패 예시:
+
+```json
+{"request_id":"pick-001:zone-2","detected":false}
+```
+
+`detected=true`인 경우 Any6D 노드는 기존
+`/any6d/object_pose_base` 토픽에도 해당 물체의 `PoseStamped`를 발행해야
+합니다. 제어 노드는 탐지 응답을 기본 10초, 자세를 추가로 5초 기다립니다.
+응답 또는 유효 자세가 없으면 다음 구역으로 이동합니다. 네 구역 모두 실패하면
+홈으로 돌아가 `not_found` 결과를 발행한 뒤 다음 요청을 기다립니다.
+
+관련 값은 `SearchConfig`에서 변경할 수 있습니다. Any6D 실행 노드가 아직
+구현되지 않은 상태에서는 각 구역의 탐지 요청이 타임아웃으로 처리됩니다.
+
 ## 실제 모드 실행
 
 각 명령은 별도 터미널에서 실행합니다. 모든 터미널에서 작업공간을 source해야

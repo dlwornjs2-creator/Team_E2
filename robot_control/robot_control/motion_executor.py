@@ -7,7 +7,7 @@ import time
 import numpy as np
 from rclpy.node import Node
 
-from .config import GripperConfig, MotionConfig, RobotConfig
+from .config import GripperConfig, MotionConfig, RobotConfig, SearchConfig
 from .models import GripperError, TargetPose
 from .onrobot import RG
 from .pose_utils import matrix_to_drl_posx, validate_homogeneous_matrix
@@ -21,12 +21,14 @@ class MotionExecutor:
         robot_config: RobotConfig,
         motion_config: MotionConfig,
         gripper_config: GripperConfig,
+        search_config: SearchConfig,
     ) -> None:
         self.node = node
         self.dsr = dsr_api
         self.robot_config = robot_config
         self.motion_config = motion_config
         self.gripper_config = gripper_config
+        self.search_config = search_config
         self.busy = False
         self.holding_object = False
 
@@ -51,12 +53,51 @@ class MotionExecutor:
             self.dsr.set_tcp(self.robot_config.tcp_name)
 
     def move_home(self) -> None:
+        if not self.robot_config.enable_motion:
+            self.node.get_logger().info("Dry-run: search zone 1 (home)")
+            return
         self.dsr.movej(
             list(self.robot_config.home_joint),
             vel=self.robot_config.joint_vel,
             acc=self.robot_config.joint_acc,
         )
         self.dsr.mwait()
+
+    def move_to_search_zone(self, zone: int) -> None:
+        """Move to one of the four configured search viewpoints."""
+        if zone not in {1, 2, 3, 4}:
+            raise ValueError(f"Unsupported search zone: {zone}")
+        if not self.robot_config.enable_motion:
+            self.node.get_logger().info(f"Dry-run: move to search zone {zone}")
+            return
+
+        self.busy = True
+        try:
+            if zone == 1:
+                self.move_home()
+            elif zone == 3:
+                self.dsr.movej(
+                    list(self.search_config.zone3_joint),
+                    vel=self.robot_config.joint_vel,
+                    acc=self.robot_config.joint_acc,
+                )
+                self.dsr.mwait()
+            else:
+                offset_x = (
+                    self.search_config.zone2_base_x_mm
+                    if zone == 2
+                    else self.search_config.zone4_base_x_mm
+                )
+                self.dsr.movel(
+                    [offset_x, 0.0, 0.0, 0.0, 0.0, 0.0],
+                    vel=self.search_config.linear_vel,
+                    acc=self.search_config.linear_acc,
+                    ref=getattr(self.dsr, "DR_BASE", 0),
+                    mod=getattr(self.dsr, "DR_MV_MOD_REL", 1),
+                )
+                self.dsr.mwait()
+        finally:
+            self.busy = False
 
     def initialize(self) -> None:
         if not self.robot_config.enable_motion:

@@ -13,6 +13,8 @@ class TaskOutcome(str, Enum):
     QUEUED = "queued"
     DB_LOOKUP = "db_lookup"
     WAITING_POSE = "waiting_pose"
+    SEARCHING = "searching"
+    ZONE_NOT_FOUND = "zone_not_found"
     PICK_COMPLETED = "pick_completed"
     NOT_FOUND = "not_found"
     DRY_RUN = "dry_run"
