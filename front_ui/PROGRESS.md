@@ -131,8 +131,11 @@ front_ui/
 │   │   ├── map_view.py            완료 — 마우스 회전·줌·리셋(+오른쪽 드래그로
 │   │   │                          피벗 패닝) 되는 MapView. zones/objects/robot_links
 │   │   │                          다 연결됨. show_robot 플래그로 화면별 로봇 표시
-│   │   │                          여부 결정. build_map()(snapshot 받는 함수 하나로
-│   │   │                          통합)은 아직 — HomeView/MonitorView가 각자 부름
+│   │   │                          여부 결정. 드래그 중엔 폴링 update()가 안 그리고
+│   │   │                          미뤄뒀다가 드래그 끝나면 반영함(로봇이 실제로
+│   │   │                          움직이기 시작하면서 드래그 중 렉 체감돼서 추가).
+│   │   │                          build_map()(snapshot 받는 함수 하나로 통합)은
+│   │   │                          아직 — HomeView/MonitorView가 각자 부름
 │   │   ├── robot_points.py        완료 — assets/robot/*.npy 로딩·캐싱, robot.links의
 │   │   │                          pos/rpy로 배치해서 하나의 배열로 합침. base_link
 │   │   │                          정면축이 90도 어긋나 있어서 위에서 봤을 때
@@ -154,10 +157,36 @@ front_ui/
     ├── render_object.py         완료 — OBJ → PNG 오프라인 사전렌더 (지금은
     │                            안 씀, OBJ 없는 물체용 폴백 경로로 남겨둠)
     └── mesh_to_points.py        완료 — doosan-robot2 M0609 mesh(.dae) 22513개
-                                  꼭짓점 -> assets/robot/*.npy 5000개로 축소.
-                                  모델 바뀌면 파일 상단 MODEL/LINKS만 고치면 됨
+                                  꼭짓점 -> assets/robot/*.npy로 축소(처음 5000개
+                                  -> 화면 전환할 때 묵직하다는 보고로 1500개로
+                                  더 줄임, 2026-08-05). 모델 바뀌면 파일 상단
+                                  MODEL/LINKS만 고치면 됨
 
-back_ui/                       미착수 (ROS 노드 전체)
+back_ui/                       진행 중 — HTTP 서버 + joint_states 구독 됨
+  ├── node.py                    완료 — 진짜 rclpy Node. HTTP 서버를 백그라운드
+  │                                스레드로 띄우고 메인 스레드는 rclpy.spin().
+  │                                `/dsr01/joint_states`(sensor_msgs/JointState,
+  │                                robot_name 파라미터로 바꿀 수 있음, 기본 dsr01)
+  │                                구독 — 처음엔 이름 없는 `/joint_states`로 잘못
+  │                                짚었다가 실제 `ros2 topic list`로 정정함(이름
+  │                                없는 것도 따로 존재하지만 진짜 관절값 아님).
+  │                                image/voice/main 노드는 아직 없음, db는
+  │                                서비스만 냄(2026-08-05 확인)
+  ├── robot_fk.py                 완료 — 관절각(라디안) -> 링크 pos/rpy. M0609
+  │                                URDF 조인트 체인을 그대로 옮겨 적음(축이 전부
+  │                                로컬 z라 origin·Rz(angle) 체인으로 계산됨).
+  │                                0도일 때 front_ui의 예전 zero-pose 계산과
+  │                                정확히 일치하는 것 확인함
+  ├── http_server.py              완료 — /state·/health·/frame.jpg, fake_server.py와
+  │                                동일 계약(front_ui/README.md 참고)
+  ├── state_store.py              진행 중 — robot.links, system.robot_connected가
+  │                                실제 값(관절 콜백이 채움 — 메시지 온 지 2초
+  │                                넘으면 다시 연결 끊김으로 봄). 관절 콜백은
+  │                                0.1초보다 자주 처리 안 함(수백 Hz 퍼블리시가
+  │                                HTTP 스레드 GIL을 뺏어가는 문제 있었음).
+  │                                objects/zones/recent_tasks는 아직 정적.
+  │                                task는 흐르는 더미(연결 테스트용)
+  └── frame_store.py              진행 중 — set_latest() 아직 아무도 안 부름(501 고정)
 ```
 
 ---
@@ -204,5 +233,18 @@ back_ui/                       미착수 (ROS 노드 전체)
    URDF 조인트 원점을 0도 자세로 이어붙인 고정값(다 펴진 자세) — back_ui가
    생기면 진짜 FK 값으로 대체된다.
 
-그 다음: 작업(monitor) 화면 나머지 4패널(카메라/판단·행동/실행 단계/작업
-정보) 실데이터 연결, 로그 화면 구현, `back_ui` 실제 ROS 노드 구현.
+그 다음: `back_ui`에 실제 토픽 구독 붙이기(`state_store.py`를 콜백이 채우게),
+작업(monitor) 화면 나머지 4패널(카메라/판단·행동/실행 단계/작업 정보)
+실데이터 연결, 로그 화면 구현.
+
+`back_ui` 실행 확인 (2026-08-05):
+```bash
+conda deactivate
+source /opt/ros/humble/setup.bash
+cd ~/cobot_ws
+colcon build --packages-select back_ui --symlink-install
+source install/setup.bash && ros2 run back_ui node
+```
+`/health`·`/state`·`/frame.jpg`(501)·404 다 확인했고, 실제 `HomeView`/
+`MonitorView`에 이 스냅샷을 그대로 먹여서 안 죽는 것까지 확인함(빈 값
+투성이라 front_ui의 안내 문구 처리가 제대로 타는지 검증한 셈).

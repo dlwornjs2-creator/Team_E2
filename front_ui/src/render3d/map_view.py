@@ -115,6 +115,15 @@ class MapView:
         self._pivot0 = self._cam.pivot  # 더블클릭 리셋용 원래 피벗
         self._right_pan_last: tuple[float, float] | None = None  # 직전 오른쪽 드래그 위치(px)
 
+        # 드래그 중에 폴링(update())이 끼어들면 안 된다 — 로봇 팔이 실제로
+        # 움직이기 시작하면서(back_ui가 진짜 관절값을 보내기 시작한 뒤,
+        # 2026-08-05) 폴링마다 오는 값이 매번 달라져 _redraw()가 드래그
+        # 프레임 사이사이에 끼어드는 게 체감될 정도가 됐다. 드래그 중엔
+        # update()가 데이터만 받아두고 그리는 건 미뤘다가, 드래그가 끝나면
+        # 한 번에 반영한다.
+        self._dragging = False
+        self._pending_redraw = False
+
         # 구현 순서 1~3 확인용 더미 점. zones/objects가 실제로 붙으면(4~6단계) 없앤다.
         if dummy_points:
             rng = np.random.default_rng(0)
@@ -148,6 +157,7 @@ class MapView:
             mouse_cursor=ft.MouseCursor.MOVE,
             on_pan_start=self._on_pan_start,
             on_pan_update=self._on_pan_update,
+            on_pan_end=self._on_drag_end,
             on_scroll=self._on_scroll,
             on_double_tap=self._on_double_tap,
             # 가운데 휠 버튼 드래그는 Flet GestureDetector에 이벤트 자체가 없다
@@ -155,6 +165,7 @@ class MapView:
             # 드래그를 피벗 이동(패닝)으로 쓴다 — 왼쪽=회전, 오른쪽=이동, 휠=확대.
             on_right_pan_start=self._on_right_pan_start,
             on_right_pan_update=self._on_right_pan_update,
+            on_right_pan_end=self._on_drag_end,
         )
 
     def _redraw(self):
@@ -232,6 +243,14 @@ class MapView:
         self._current_zone_id = current_zone_id
         self._objects = objects or []
         self._robot_links = robot_links or []
+
+        if self._dragging:
+            # 드래그 도중 폴링이 오면 여기서 안 그리고 미룬다 — 값은 이미
+            # 위에서 최신으로 받아뒀으니 드래그가 끝나는 순간(_on_drag_end)
+            # 한 번만 반영해도 데이터가 밀리지 않는다.
+            self._pending_redraw = True
+            return
+
         self._redraw()
         try:
             self.control.update()
@@ -242,7 +261,20 @@ class MapView:
             # 실제로 화면에 붙은 뒤(폴링/드래그)에만 갱신하면 되니 무시한다.
             pass
 
+    def _on_drag_end(self, e):
+        """왼쪽/오른쪽 드래그 둘 다 여기로 온다 — 끝나고 나서 미뤄둔 폴링
+        갱신이 있으면 그제서야 한 번 반영한다."""
+        self._dragging = False
+        if self._pending_redraw:
+            self._pending_redraw = False
+            self._redraw()
+            try:
+                self.control.update()
+            except RuntimeError:
+                pass
+
     def _on_pan_start(self, e: ft.DragStartEvent):
+        self._dragging = True
         self._yaw0 = self._cam.yaw
         self._pitch0 = self._cam.pitch
 
@@ -272,6 +304,7 @@ class MapView:
         self.control.update()
 
     def _on_right_pan_start(self, e: ft.PointerEvent):
+        self._dragging = True
         self._right_pan_last = (e.global_position.x, e.global_position.y)
 
     def _on_right_pan_update(self, e: ft.PointerEvent):

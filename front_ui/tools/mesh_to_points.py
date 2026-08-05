@@ -45,8 +45,13 @@ LINKS = {
 }
 
 SCALE = 0.001  # URDF의 <mesh scale="0.001 0.001 0.001"/> — mesh 파일 자체는 mm 단위
-TOTAL_POINT_BUDGET = 5000  # draw_points 성능 검증 때 썼던 범위(명세 12장)에 맞춤
-MIN_POINTS_PER_LINK = 150  # 작은 링크도 형태는 알아볼 수 있게 최소치를 둔다
+# 5000으로 처음 만들었는데, 화면 전환(다른 화면 -> 홈)할 때 이 점군 전체를
+# 새로 붙이는 비용이 묵직하게 느껴진다는 보고가 있어서(2026-08-05) 줄였다.
+# draw_points()가 한 도형으로 묶어서 보내긴 하지만, 좌표 개수 자체(x,y 5000쌍)는
+# 그대로 전송/파싱 비용이라 화면이 작은 미리보기 패널 용도로는 이 정도로도
+# 로봇 팔 형태를 알아보는 데 충분하다.
+TOTAL_POINT_BUDGET = 1500
+MIN_POINTS_PER_LINK = 60  # 작은 링크도 형태는 알아볼 수 있게 최소치를 둔다
 
 _COLLADA_NS = "http://www.collada.org/2005/11/COLLADASchema"
 
