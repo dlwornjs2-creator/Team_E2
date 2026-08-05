@@ -25,10 +25,12 @@ endif()
 
 find_package(rosidl_default_generators REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
+  "srv/ControlTask.srv"
   "srv/NodeInit.srv"
   "srv/DbSave.srv"
   "srv/DbLoad.srv"
   "srv/DetectObject.srv"
+  "srv/RobotResult.srv"
 )
 ament_export_dependencies(rosidl_default_runtime)
 ament_package()

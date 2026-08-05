@@ -81,8 +81,8 @@ class RobotControlNode(Node):
         interface = self.config.interface
         self.get_logger().info(
             f"Control ready: init={interface.control_init_service}, "
-            f"request={interface.state_task_topic}, "
-            f"result={interface.control_result_topic}"
+            f"request={interface.control_task_service}, "
+            f"result={interface.state_result_service}"
         )
 
     def _status_payload(self) -> dict[str, Any]:
@@ -377,7 +377,7 @@ class RobotControlNode(Node):
         """
         interface = self.config.interface
         self.get_logger().info(
-            f"Waiting for state-node tasks on {interface.state_task_topic}"
+            f"Waiting for state-node tasks on {interface.control_task_service}"
         )
         if self.config.pose.input_mode == "any6d":
             self.get_logger().info(

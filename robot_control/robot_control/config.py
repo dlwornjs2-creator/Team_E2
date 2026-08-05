@@ -90,8 +90,8 @@ class PoseConfig:
 @dataclass(frozen=True)
 class InterfaceConfig:
     control_init_service: str = "/control/init"
-    state_task_topic: str = "/state/robot_request"
-    control_result_topic: str = "/control/robot_result"
+    control_task_service: str = "/control/task"
+    state_result_service: str = "/state/robot_result"
     db_load_service: str = "/db/load"
     db_service_wait_timeout_sec: float = 2.0
     db_response_timeout_sec: float = 5.0

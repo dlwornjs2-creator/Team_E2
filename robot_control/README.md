@@ -281,15 +281,15 @@ ros2 run state state_node --ros-args \
   -p targets:="['db', 'control']"
 ```
 
-현재 상태 노드 구현에는 `/state/robot_request` 작업 생성 기능이 없으므로 통합
-전까지는 아래와 같이 테스트 요청을 직접 발행할 수 있습니다.
+상태 노드는 `/control/task` 서비스를 호출하고 `/state/robot_result` 서비스를
+제공해야 합니다. 통합 전에는 아래처럼 작업 서비스를 직접 호출할 수 있습니다.
 
 ## 작업 요청 형식
 
-토픽:
+서비스:
 
 ```text
-/state/robot_request (std_msgs/msg/String)
+/control/task (interfaces/srv/ControlTask)
 ```
 
 JSON 예시:
@@ -304,11 +304,11 @@ JSON 예시:
 }
 ```
 
-발행 예시:
+호출 예시:
 
 ```bash
-ros2 topic pub --once /state/robot_request std_msgs/msg/String \
-  "{data: '{\"task_id\":\"pick-001\",\"name\":\"빨간 컵\",\"class_label\":\"cup\",\"command\":\"pick\",\"requested_by\":\"state_node\"}'}"
+ros2 service call /control/task interfaces/srv/ControlTask \
+  "{request: '{\"task_id\":\"pick-001\",\"name\":\"빨간 컵\",\"class_label\":\"cup\",\"command\":\"pick\",\"requested_by\":\"state_node\"}'}"
 ```
 
 작업 요청 후 제어 노드는 다음 순서로 처리합니다.
@@ -379,11 +379,13 @@ ROS 표준 위치 단위는 m이지만 이 서비스 계약은 mm입니다. Any6
 
 ## 결과 확인
 
-제어 결과 토픽:
+제어 노드는 진행 및 완료 결과를 다음 상태 노드 서비스로 요청합니다.
 
-```bash
-ros2 topic echo /control/robot_result
+```text
+/state/robot_result (interfaces/srv/RobotResult)
 ```
+
+상태 노드는 `request`의 결과 JSON을 저장한 뒤 `success=true`로 응답해야 합니다.
 
 주요 outcome:
 

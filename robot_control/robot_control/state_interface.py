@@ -1,4 +1,4 @@
-"""State-node request, readiness, task queue, and result interface."""
+"""Service-only interface between the state node and robot controller."""
 
 from __future__ import annotations
 
@@ -7,15 +7,8 @@ import threading
 from collections import deque
 from typing import Any, Callable, Optional
 
-from interfaces.srv import NodeInit
+from interfaces.srv import ControlTask, NodeInit, RobotResult
 from rclpy.node import Node
-from rclpy.qos import (
-    DurabilityPolicy,
-    HistoryPolicy,
-    QoSProfile,
-    ReliabilityPolicy,
-)
-from std_msgs.msg import String
 
 from .config import InterfaceConfig
 from .models import RobotTask, TaskOutcome
@@ -26,6 +19,8 @@ AcceptanceGuard = Callable[[], Optional[str]]
 
 
 class StateInterface:
+    """Receive task services and send lifecycle events through a service."""
+
     def __init__(
         self,
         node: Node,
@@ -43,28 +38,21 @@ class StateInterface:
         self._pending: deque[RobotTask] = deque()
         self._active: Optional[RobotTask] = None
         self._known_task_ids: set[str] = set()
+        self._result_futures: set[Any] = set()
 
-        qos = QoSProfile(
-            history=HistoryPolicy.KEEP_LAST,
-            depth=10,
-            reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.VOLATILE,
-        )
         self.init_service = node.create_service(
             NodeInit,
             config.control_init_service,
             self._on_init_request,
         )
-        self.task_subscription = node.create_subscription(
-            String,
-            config.state_task_topic,
+        self.task_service = node.create_service(
+            ControlTask,
+            config.control_task_service,
             self._on_task_request,
-            qos,
         )
-        self.result_publisher = node.create_publisher(
-            String,
-            config.control_result_topic,
-            qos,
+        self.result_client = node.create_client(
+            RobotResult,
+            config.state_result_service,
         )
 
     @property
@@ -117,45 +105,35 @@ class StateInterface:
             raise ValueError(f"JSON 파싱 실패: {error}") from error
         if not isinstance(payload, dict):
             raise ValueError("요청은 JSON 객체여야 합니다")
-
         command = str(payload.get("command", "pick")).strip().lower()
         if command not in {"pick", "search", "search_and_pick"}:
             raise ValueError(f"지원하지 않는 command: {command}")
-
-        name = str(
-            payload.get("name") or payload.get("target_name") or ""
-        ).strip()
+        name = str(payload.get("name") or payload.get("target_name") or "").strip()
         class_label = str(payload.get("class_label") or "").strip()
         if not name and not class_label:
             raise ValueError("name(target_name) 또는 class_label이 필요합니다")
-
         task_id = str(payload.get("task_id") or "").strip()
         if not task_id:
             task_id = f"task-{self.node.get_clock().now().nanoseconds}"
-        requested_by = str(payload.get("requested_by", "state_node")).strip()
         return RobotTask(
             task_id=task_id,
             name=name,
             class_label=class_label,
-            requested_by=requested_by,
+            requested_by=str(payload.get("requested_by", "state_node")).strip(),
             command=command,
         )
 
-    def _on_task_request(self, message: String) -> None:
+    def _on_task_request(self, request, response):
         try:
-            task = self._parse_task(message.data)
+            task = self._parse_task(request.request)
         except ValueError as error:
-            self.node.get_logger().error(f"Rejected state request: {error}")
-            self.publish_event(
-                None,
-                status="completed",
-                success=False,
-                outcome=TaskOutcome.REJECTED,
-                message=str(error),
-            )
-            return
+            response.success = False
+            response.response = "{}"
+            response.message = str(error)
+            return response
 
         rejection = ""
+        queue_size = 0
         with self._lock:
             if not self._ready:
                 rejection = "제어 노드 초기화가 완료되지 않았습니다"
@@ -165,33 +143,26 @@ class StateInterface:
                 rejection = "작업 대기열이 가득 찼습니다"
             else:
                 rejection = self.acceptance_guard() or ""
-
             if not rejection:
                 self._known_task_ids.add(task.task_id)
                 self._pending.append(task)
                 queue_size = len(self._pending)
 
-        if rejection:
-            self.node.get_logger().warning(
-                f"Rejected task {task.task_id}: {rejection}"
-            )
-            self.publish_event(
-                task,
-                status="completed",
-                success=False,
-                outcome=TaskOutcome.REJECTED,
-                message=rejection,
-            )
-            return
-
-        self.publish_event(
-            task,
-            status="accepted",
-            success=True,
-            outcome=TaskOutcome.QUEUED,
-            message="작업 요청을 접수했습니다",
-            extra={"queue_size": queue_size},
+        response.success = not rejection
+        response.response = json.dumps(
+            {
+                "task_id": task.task_id,
+                "outcome": (
+                    TaskOutcome.REJECTED.value
+                    if rejection
+                    else TaskOutcome.QUEUED.value
+                ),
+                "queue_size": queue_size,
+            },
+            ensure_ascii=False,
         )
+        response.message = rejection or "작업 요청을 접수했습니다"
+        return response
 
     def publish_event(
         self,
@@ -203,9 +174,7 @@ class StateInterface:
         message: str,
         extra: Optional[dict[str, Any]] = None,
     ) -> None:
-        outcome_value = (
-            outcome.value if isinstance(outcome, TaskOutcome) else outcome
-        )
+        outcome_value = outcome.value if isinstance(outcome, TaskOutcome) else outcome
         payload: dict[str, Any] = {
             "task_id": task.task_id if task else None,
             "status": status,
@@ -215,18 +184,45 @@ class StateInterface:
             "stamp_ns": self.node.get_clock().now().nanoseconds,
         }
         if task:
-            payload["target"] = {
-                "name": task.name,
-                "class_label": task.class_label,
-            }
-            payload["command"] = task.command
-            payload["requested_by"] = task.requested_by
+            payload.update(
+                {
+                    "target": {
+                        "name": task.name,
+                        "class_label": task.class_label,
+                    },
+                    "command": task.command,
+                    "requested_by": task.requested_by,
+                }
+            )
         if extra:
             payload.update(extra)
 
-        result = String()
-        result.data = json.dumps(payload, ensure_ascii=False)
-        self.result_publisher.publish(result)
+        if not self.result_client.service_is_ready():
+            self.result_client.wait_for_service(timeout_sec=0.2)
+        if not self.result_client.service_is_ready():
+            self.node.get_logger().warning(
+                f"State result service unavailable: {self.config.state_result_service}"
+            )
+            return
+        request = RobotResult.Request()
+        request.request = json.dumps(payload, ensure_ascii=False)
+        future = self.result_client.call_async(request)
+        self._result_futures.add(future)
+        future.add_done_callback(self._on_result_response)
+
+    def _on_result_response(self, future) -> None:
+        self._result_futures.discard(future)
+        try:
+            response = future.result()
+            if response is None or not response.success:
+                message = response.message if response else "empty response"
+                self.node.get_logger().warning(
+                    f"State rejected robot result: {message}"
+                )
+        except Exception as error:
+            self.node.get_logger().warning(
+                f"State result service call failed: {error}"
+            )
 
     def take_next_task(self) -> Optional[RobotTask]:
         with self._lock:
