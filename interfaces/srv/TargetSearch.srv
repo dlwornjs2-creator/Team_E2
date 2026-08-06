@@ -2,4 +2,8 @@ string target_name
 string class_label
 ---
 bool success
+<<<<<<< HEAD
 string message
+=======
+string message
+>>>>>>> 54ff022c671e3e35d52276409e2704fd30e9913c
