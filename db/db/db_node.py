@@ -26,11 +26,17 @@ JSON 형식
   "tasks"는 ALLOWED_COLUMNS 화이트리스트로 걸러진 컬럼만 그대로
   INSERT/SELECT하는 공용 경로를 쓴다(db 저장 로그 명세 2026-08-06 참고).
 
-  DbSave 요청(table 생략="items")
-    {"source": "item_node",
-     "items": [{"name": "컵", "class_label": "cup",
-                "location": "주방 싱크대", "confidence": 0.92}, ...]}
+  items 스키마는 비전 노드가 실제로 내는 형식(class_name/confidence/x/y/z)에
+  맞췄다(2026-08-06 정정) — 사람이 부르는 "name"이나 문자열 "location"은
+  없다. class_name 이 upsert 기준 키다(같은 class_name 이면 최신 감지값으로
+  덮어씀).
+
+  DbSave 요청(table 생략 또는 "items")
+    {"table": "items",  # 생략 가능
+     "rows": [{"class_name": "green_frog", "confidence": 0.87,
+               "x": 412.5, "y": -135.8, "z": 125.3}, ...]}
   DbSave 응답  {"inserted": 1, "updated": 2, "results": [...]}
+  -> rows 대신 예전 방식대로 {"items": [...]} 로 보내도 여전히 된다(호환용).
 
   DbSave 요청(table="tasks")
     {"table": "tasks",
@@ -38,10 +44,9 @@ JSON 형식
   DbSave 응답  {"table": "tasks", "inserted": 1, "results": [...]}
   -> 화이트리스트에 없는 키가 하나라도 있으면 전부 안 쓰고 에러(success=false).
 
-  DbLoad 요청(table 생략="items")
-    {}                      -> 전체
-    {"name": "컵"}          -> 이름으로 조회
-    {"class_label": "cup"}  -> 클래스로 조회
+  DbLoad 요청(table 생략 또는 "items")
+    {}                            -> 전체
+    {"class_name": "green_frog"}  -> 클래스명으로 조회
   DbLoad 응답  {"count": 4, "items": [{...}, ...]}
 
   DbLoad 요청(table="tasks")
@@ -67,10 +72,12 @@ from interfaces.srv import DbLoad, DbSave, NodeInit
 CREATE_ITEMS = """
 CREATE TABLE IF NOT EXISTS items (
     id          INTEGER PRIMARY KEY,
-    name        TEXT NOT NULL UNIQUE COLLATE NOCASE,  -- 사람이 부르는 이름
-    class_label TEXT NOT NULL,                        -- 검출기가 뱉는 클래스명
-    location    TEXT NOT NULL,                        -- 마지막으로 본 위치
-    last_seen   TEXT NOT NULL                         -- ISO8601 문자열
+    class_name  TEXT NOT NULL UNIQUE COLLATE NOCASE,  -- 비전이 주는 클래스명(green_frog 등)
+    confidence  REAL,                                 -- 인식 신뢰도
+    x           REAL NOT NULL,                        -- 위치. 좌표계·단위는 비전이 주는 그대로
+    y           REAL NOT NULL,
+    z           REAL NOT NULL,
+    last_seen   TEXT NOT NULL                         -- ISO8601. 서버가 저장 시각에 자동으로 찍음
 )
 """
 
@@ -89,9 +96,8 @@ CREATE TABLE IF NOT EXISTS tasks (
 )
 """
 
-CREATE_INDEXES = [
-    "CREATE INDEX IF NOT EXISTS idx_items_class ON items(class_label)",
-]
+# class_name 이 UNIQUE라 이미 자동으로 인덱싱된다 — 별도 인덱스 불필요.
+CREATE_INDEXES = []
 
 # /db/save, /db/load 의 "table" 분기에서 쓰는 컬럼 화이트리스트. "items"는
 # record_items_batch()/search_items()라는 전용 로직(upsert)이 따로 있어서
@@ -100,7 +106,7 @@ CREATE_INDEXES = [
 # 동적 INSERT의 컬럼명을 payload 키에서 직접 안 받고 이 화이트리스트를
 # 거치는 이유: 오타·임의 컬럼이 조용히 무시되거나 SQL에 그대로 꽂히면 안 된다.
 ALLOWED_COLUMNS = {
-    "items": {"name", "class_label", "location", "last_seen"},
+    "items": {"class_name", "confidence", "x", "y", "z", "last_seen"},
     "tasks": {
         "command_text", "target_name", "destination",
         "status", "fail_stage", "fail_reason",
@@ -116,47 +122,65 @@ def now_iso() -> str:
     return datetime.now().isoformat(timespec='seconds')
 
 
-def normalize_record(rec):
-    """(name, class_label, location) 튜플로 통일한다.
+def _needs_recreate(conn, table, expected_columns) -> bool:
+    """이미 있는 테이블의 컬럼이 지금 기대하는 것과 다르면 True.
 
-    payload에 confidence가 여전히 들어올 수 있다(옛 호출부 호환용) — 다만
-    이제 그 값을 저장할 곳이 없어서(sightings 삭제, 2026-08-06) 그냥
-    무시한다. 호출부를 다시 고치라고 강제하지 않으려는 것.
+    `CREATE TABLE IF NOT EXISTS`는 이미 있는 테이블은 안 건드린다 — 개발
+    중 스키마가 바뀌었는데 예전 DB 파일을 그대로 쓰면, 코드는 새 컬럼을
+    기대하는데 파일엔 옛날 컬럼이 남아있어서 조회할 때 "그런 컬럼 없음"
+    으로 죽는다(2026-08-06 실제로 겪음 — items가 name/class_label/location
+    에서 class_name/confidence/x/y/z로 바뀐 뒤).
+    테이블이 아예 없으면 False — 그건 그냥 새로 만들면 되니 여기서 상관할
+    일이 아니다.
+    """
+    existing = {row[1] for row in conn.execute(f'PRAGMA table_info({table})')}
+    return bool(existing) and existing != expected_columns
+
+
+def normalize_record(rec):
+    """(class_name, confidence, x, y, z) 튜플로 통일한다.
+
+    비전 노드가 실제로 내는 형식 그대로다(2026-08-06 정정) — 사람이 부르는
+    "name"이나 문자열 "location"은 없다.
     """
     if isinstance(rec, dict):
-        name = rec.get('name')
-        label = rec.get('class_label', '')
-        location = rec.get('location')
+        class_name = rec.get('class_name')
+        confidence = rec.get('confidence')
+        x, y, z = rec.get('x'), rec.get('y'), rec.get('z')
     else:
-        name, label, location = rec[:3]
+        class_name, confidence, x, y, z = rec
 
-    if not name or not str(name).strip():
-        raise ValueError('name 이 비어 있습니다')
-    if not location or not str(location).strip():
-        raise ValueError(f"'{name}' 의 location 이 비어 있습니다")
+    if not class_name or not str(class_name).strip():
+        raise ValueError('class_name 이 비어 있습니다')
+    if x is None or y is None or z is None:
+        raise ValueError(f"'{class_name}' 의 위치(x/y/z)가 비어 있습니다")
 
-    return str(name).strip(), str(label), str(location).strip()
+    return (str(class_name).strip(),
+            float(confidence) if confidence is not None else None,
+            float(x), float(y), float(z))
 
 
-def _write_one(cur, name, class_label, location, last_seen):
+def _write_one(cur, class_name, confidence, x, y, z, last_seen):
     """물건 1건을 upsert한다. (트랜잭션은 호출한 쪽이 연다)"""
     before = cur.execute(
-        'SELECT id FROM items WHERE name = ?', (name,)).fetchone()
+        'SELECT id FROM items WHERE class_name = ?', (class_name,)).fetchone()
 
     cur.execute(
         """
-        INSERT INTO items (name, class_label, location, last_seen)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(name) DO UPDATE SET
-            class_label = excluded.class_label,
-            location    = excluded.location,
-            last_seen   = excluded.last_seen
+        INSERT INTO items (class_name, confidence, x, y, z, last_seen)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(class_name) DO UPDATE SET
+            confidence = excluded.confidence,
+            x          = excluded.x,
+            y          = excluded.y,
+            z          = excluded.z,
+            last_seen  = excluded.last_seen
         """,
-        (name, class_label, location, last_seen),
+        (class_name, confidence, x, y, z, last_seen),
     )
 
     item_id = cur.execute(
-        'SELECT id FROM items WHERE name = ?', (name,)).fetchone()[0]
+        'SELECT id FROM items WHERE class_name = ?', (class_name,)).fetchone()[0]
 
     return item_id, ('update' if before else 'insert')
 
@@ -173,23 +197,21 @@ def record_items_batch(conn, records):
 
     with conn:                   # 여기서 트랜잭션 한 번만 열린다
         cur = conn.cursor()
-        for name, label, location in normalized:
-            item_id, action = _write_one(cur, name, label, location, seen_at)
-            results.append({'name': name, 'id': item_id, 'action': action})
+        for class_name, confidence, x, y, z in normalized:
+            item_id, action = _write_one(
+                cur, class_name, confidence, x, y, z, seen_at)
+            results.append({'class_name': class_name, 'id': item_id, 'action': action})
 
     return results
 
 
-def search_items(conn, name=None, class_label=None):
+def search_items(conn, class_name=None):
     """조건에 맞는 items 를 dict 리스트로 돌려준다. 조건이 없으면 전체."""
     conn.row_factory = sqlite3.Row
 
-    if name:
-        sql = 'SELECT * FROM items WHERE name = ? ORDER BY name'
-        args = (name.strip(),)
-    elif class_label:
-        sql = 'SELECT * FROM items WHERE class_label = ? ORDER BY name'
-        args = (class_label.strip(),)
+    if class_name:
+        sql = 'SELECT * FROM items WHERE class_name = ? ORDER BY class_name'
+        args = (class_name.strip(),)
     else:
         sql = 'SELECT * FROM items ORDER BY id'
         args = ()
@@ -315,7 +337,9 @@ def handle_save(conn, request_json):
         return False, '{}', f"허용되지 않은 테이블입니다: '{table}'"
 
     if table == 'items':
-        records = payload.get('items', [])
+        # 비전 노드는 "rows" 키로 보낸다(tasks와 통일). 예전 호출부가
+        # "items" 키로 보내던 것도 여전히 받아준다.
+        records = payload.get('rows') or payload.get('items') or []
 
         if not records:
             return False, '{}', '저장할 항목이 없습니다'
@@ -364,18 +388,15 @@ def handle_search(conn, request_json):
         return False, '{}', f"허용되지 않은 테이블입니다: '{table}'"
 
     if table == 'items':
-        name = payload.get('name')
-        class_label = payload.get('class_label')
+        class_name = payload.get('class_name')
 
         try:
-            rows = search_items(conn, name=name, class_label=class_label)
+            rows = search_items(conn, class_name=class_name)
         except sqlite3.Error as e:
             return False, '{}', f'조회 실패: {e}'
 
-        if name:
-            msg = f"'{name}' {'찾음' if rows else '없음'}"
-        elif class_label:
-            msg = f"class='{class_label}' {len(rows)}건"
+        if class_name:
+            msg = f"'{class_name}' {'찾음' if rows else '없음'}"
         else:
             msg = f'전체 {len(rows)}건'
 
@@ -430,6 +451,21 @@ class DBNode(Node):
             self.conn.execute('PRAGMA foreign_keys = ON')
 
             cur = self.conn.cursor()
+
+            # 스키마가 바뀌었는데 예전 파일 그대로면(_needs_recreate 참고)
+            # 지우고 새로 만든다 — 개발 단계라 데이터 보존보다 안 죽는 게
+            # 우선이다. 운영 데이터가 쌓이기 시작하면 이 방식(드롭)은 진짜
+            # 마이그레이션으로 바꿔야 한다.
+            for table, expected in (
+                ('items', ALLOWED_COLUMNS['items'] | {'id'}),
+                ('tasks', ALLOWED_COLUMNS['tasks'] | {'id'}),
+            ):
+                if _needs_recreate(self.conn, table, expected):
+                    self.get_logger().warn(
+                        f"'{table}' 테이블 스키마가 바뀌어서 다시 만듭니다"
+                        f' (기존 데이터는 사라집니다)')
+                    cur.execute(f'DROP TABLE {table}')
+
             cur.execute(CREATE_ITEMS)
             cur.execute(CREATE_TASKS)
             for sql in CREATE_INDEXES:
@@ -538,8 +574,8 @@ class DBNode(Node):
             f'--- items {len(items)}건 / tasks {n_tasks}건 ---')
         for r in items:
             self.get_logger().info(
-                f"  [{r['id']}] {r['name']} ({r['class_label']}) "
-                f"@ {r['location']} / {r['last_seen']}")
+                f"  [{r['id']}] {r['class_name']} (conf={r['confidence']}) "
+                f"@ ({r['x']}, {r['y']}, {r['z']}) / {r['last_seen']}")
 
     # ------------------------------------------------------------------
     def destroy_node(self):
