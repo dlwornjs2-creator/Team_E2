@@ -153,7 +153,7 @@ class DBTestNode(Node):
             source='manual')
 
     def menu_clear(self):
-        print('  !! items / sightings 를 전부 지웁니다. 되돌릴 수 없습니다.')
+        print('  !! items 를 전부 지웁니다. 되돌릴 수 없습니다.')
         answer = input('  정말 지우려면 DELETE 를 그대로 입력하세요: ').strip()
         if answer != 'DELETE':
             print('  취소했습니다')
@@ -181,7 +181,7 @@ class DBTestNode(Node):
             print(f"    db_path   : {st.get('db_path')}")
             print(f"    tables    : {st.get('tables')}")
             print(f"    items     : {st.get('items')}건")
-            print(f"    sightings : {st.get('sightings')}건")
+            print(f"    tasks     : {st.get('tasks')}건")
 
     # ------------------------------------------------------------------
     def loop(self):
