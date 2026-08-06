@@ -20,12 +20,29 @@
 사용
   service  /<노드>/init          interfaces/NodeInit      각 노드의 준비 확인
   action   /item/search          interfaces/Search        탐색 실행 지시
+  service  /db/save              interfaces/DbSave        작업 종료 시 기록(table="tasks")
+
+작업기록(tasks) 저장 — db 저장 로그 명세 2026-08-06 참고
+  탐색 goal 이 수락된 순간 self.current_task 에 dict 하나를 만든다
+  (command_text/target_name/destination/started_at). action 결과가 오면
+  status/fail_stage/fail_reason/found_at/ended_at 을 채워서 /db/save 를
+  call_async 로 1회 호출한다 — 서비스 콜백 안에서 동기 call() 을 쓰면
+  SingleThreadedExecutor 기준 데드락이라 반드시 비동기로 던지고
+  add_done_callback 으로만 결과를 본다(spin_until_future_complete 금지).
+
+  TargetSearch.srv/Search.action 에 원문 음성 명령이나 배송 목적지 필드가
+  없어서(interfaces 패키지는 안 건드림) command_text/destination 은 지금
+  항상 None 으로 저장된다 — 그 필드가 필요하면 인터페이스부터 넓혀야 한다.
+  fail_stage 도 지금은 탐색(SEARCH) 단계만 존재해서 실패하면 항상
+  'SEARCH' 다 — 파지/배송 단계가 생기면 그때 단계 추적을 넓히면 된다.
 """
 
 import json
 import time
+from datetime import datetime
 
 import rclpy
+from action_msgs.msg import GoalStatus
 from rclpy.action import ActionClient
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
@@ -34,7 +51,7 @@ from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
 from std_msgs.msg import String
 
 from interfaces.action import Search
-from interfaces.srv import NodeInit, TargetSearch
+from interfaces.srv import DbSave, NodeInit, TargetSearch
 
 
 # ----------------------------------------------------------------------
@@ -43,6 +60,11 @@ from interfaces.srv import NodeInit, TargetSearch
 LOAD = 'LOAD'
 IDLE = 'IDLE'
 RUN = 'RUN'
+
+
+def now_iso() -> str:
+    """db_node.py 와 형식을 맞춘다(ISO8601, 초 단위)."""
+    return datetime.now().isoformat(timespec='seconds')
 
 
 class StateNode(Node):
@@ -68,6 +90,7 @@ class StateNode(Node):
         self.state = LOAD
         self.ready = {name: False for name in self.targets}
         self.current_goal = None        # 진행 중인 탐색 goal handle
+        self.current_task = None        # 진행 중인 작업기록 dict (db 저장용)
 
         cb = ReentrantCallbackGroup()
 
@@ -92,6 +115,12 @@ class StateNode(Node):
         # 실제 탐색을 시킬 액션 클라이언트
         self.search_cli = ActionClient(
             self, Search, self.search_action, callback_group=cb)
+
+        # 작업 종료 시 tasks 테이블에 기록할 때 쓴다 (call_async 전용,
+        # 서비스 준비 여부를 startup_check 대상에 넣진 않았다 — db 가
+        # 이미 targets 기본값에 있어서 그때 같이 확인된다)
+        self.db_save_cli = self.create_client(
+            DbSave, 'db/save', callback_group=cb)
 
         self.publish_state()
         self.get_logger().info(f'확인 대상: {self.targets}')
@@ -182,6 +211,13 @@ class StateNode(Node):
 
         # 여기서 응답은 "접수 완료" 까지만. 결과는 액션으로 따로 돌아온다
         self.current_goal = handle
+        self.current_task = {
+            'command_text': None,   # TargetSearch.srv에 원문이 없어서 못 채움
+            'target_name': name or label,
+            'destination': None,    # 지금 인터페이스엔 배송 목적지 필드가 없음
+            'stage': 'SEARCH',      # 지금은 이 단계만 존재
+            'started_at': now_iso(),
+        }
         self.set_state(RUN, f"탐색 시작: {name or label}")
 
         response.success = True
@@ -225,20 +261,79 @@ class StateNode(Node):
     def on_search_result(self, future):
         """탐색이 끝나면 호출된다. 성공/실패/취소 모두 여기로 온다."""
         self.current_goal = None
+        task = self.current_task
+        self.current_task = None
+        ended_at = now_iso()
 
         try:
-            res = future.result().result
+            wrapped = future.result()
+            res = wrapped.result
         except Exception as e:      # noqa: BLE001
             self.get_logger().error(f'탐색 결과 수신 실패: {e}')
+            self._save_task(task, status='FAILED', ended_at=ended_at,
+                            fail_reason=str(e))
             self.set_state(IDLE, '탐색 실패')
             return
 
-        if res.success:
+        if wrapped.status == GoalStatus.STATUS_CANCELED:
+            status = 'ABORTED'
+        elif res.success:
+            status = 'SUCCEEDED'
+        else:
+            status = 'FAILED'
+
+        if status == 'SUCCEEDED':
             self.get_logger().info(f'탐색 완료: {res.message} @ {res.location}')
         else:
             self.get_logger().warn(f'탐색 실패: {res.message}')
 
+        self._save_task(
+            task, status=status, ended_at=ended_at,
+            found_at=res.location or None,
+            fail_reason=None if status == 'SUCCEEDED' else res.message)
+
         self.set_state(IDLE, '탐색 종료')
+
+    # ------------------------------------------------------------------
+    # 작업기록 저장 (db 저장 로그 명세 2026-08-06)
+    # ------------------------------------------------------------------
+    def _save_task(self, task, status, ended_at, found_at=None, fail_reason=None):
+        """tasks 테이블에 1행 기록한다. call_async만 쓴다 — 결과를
+        기다렸다가 다음 동작을 하면 안 된다(데드락 주의, 파일 상단 참고).
+        """
+        if task is None:
+            # 거절된 요청(게이트키퍼 단계)은 애초에 current_task 를 안
+            # 만들어서 여기 안 온다 — 방어적으로만 막아둔다.
+            return
+
+        row = {
+            'command_text': task['command_text'],
+            'target_name': task['target_name'],
+            'destination': task['destination'],
+            'status': status,
+            'fail_stage': None if status == 'SUCCEEDED' else task['stage'],
+            'fail_reason': fail_reason,
+            'found_at': found_at,
+            'started_at': task['started_at'],
+            'ended_at': ended_at,
+        }
+
+        req = DbSave.Request()
+        req.request = json.dumps(
+            {'table': 'tasks', 'rows': [row]}, ensure_ascii=False)
+
+        future = self.db_save_cli.call_async(req)
+        future.add_done_callback(self._on_task_saved)
+
+    def _on_task_saved(self, future):
+        try:
+            res = future.result()
+        except Exception as e:      # noqa: BLE001
+            self.get_logger().error(f'[작업기록] 저장 요청 실패: {e}')
+            return
+
+        log = self.get_logger().info if res.success else self.get_logger().error
+        log(f'[작업기록] {res.message}')
 
     # ------------------------------------------------------------------
     def check_one(self, name):
