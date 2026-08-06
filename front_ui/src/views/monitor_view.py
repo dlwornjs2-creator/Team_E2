@@ -1,25 +1,15 @@
-"""작업 화면 (탐색 모니터).
+"""작업 화면."""
 
-┌──────────────────┬──────────────────┐
-│ 현재 카메라 화면   │ 현재 판단과 행동   │
-├──────────────────┼──────────────────┤
-│ 3D 지도           │ 현재 실행 단계     │
-├──────────────────┴──────────────────┤
-│ 작업 정보                             │
-└─────────────────────────────────────┘
-
-"3D 지도"만 실데이터에 연결돼 있다 — 홈 화면의 "물체 위치 3D 맵"과 같은
-내용(로봇 팔 포함)을 보여준다. 나머지 패널(카메라/행동/단계/정보)은 아직
-자리만 잡아둔 상태 — PROGRESS.md "다음 순서" 참고.
-"""
+import time
 
 import flet as ft
 
+import config as cfg
 import theme as t
-from components.panel import panel, kv
+from components.panel import panel
 from render3d.map_view import MapView
 
-# 명세 5장 stage 코드값 순서
+
 STAGES = [
     ("idle", "대기"),
     ("initial_observe", "초기 관측"),
@@ -37,62 +27,133 @@ STAGES = [
 
 
 def stage_row(label: str, state: str):
-    """state: done | current | todo"""
     if state == "current":
-        dot, color, weight = t.ACCENT, t.TEXT, ft.FontWeight.W_600
+        dot = t.ACCENT
+        color = t.TEXT
+        weight = ft.FontWeight.W_600
+
     elif state == "done":
-        dot, color, weight = t.STATUS["confirmed"], t.TEXT_DIM, ft.FontWeight.NORMAL
+        dot = t.STATUS["confirmed"]
+        color = t.TEXT_DIM
+        weight = ft.FontWeight.NORMAL
+
     else:
-        dot, color, weight = t.BORDER, t.TEXT_FAINT, ft.FontWeight.NORMAL
+        dot = t.BORDER
+        color = t.TEXT_FAINT
+        weight = ft.FontWeight.NORMAL
 
     return ft.Row(
         spacing=8,
         controls=[
-            ft.Container(width=6, height=6, bgcolor=dot, border_radius=3),
-            ft.Text(label, size=t.SIZE_BODY, color=color, weight=weight),
+            ft.Container(
+                width=6,
+                height=6,
+                bgcolor=dot,
+                border_radius=3,
+            ),
+            ft.Text(
+                label,
+                size=t.SIZE_BODY,
+                color=color,
+                weight=weight,
+            ),
         ],
     )
 
 
 class MonitorView:
-    """`.control`은 한 번만 만들고 `.update(snapshot)`으로 값만 갱신한다
-    (HomeView와 같은 패턴 — main.py가 화면 종류를 안 가리고 재사용하려면
-    이 모양(.control/.update())을 맞춰야 한다).
-
-    지금은 "3D 지도"만 실데이터에 연결돼 있다. 나머지 패널은 TODO.
-    """
-
     def __init__(self):
-        # show_robot=True: 홈 화면의 3D 맵과 같은 내용(로봇 팔 포함).
+        # 카메라 프레임 갱신 관리
+        self.last_frame_id = None
+        self.last_frame_update = 0.0
+
+        # Flet 화면에서는 약 5 FPS로 표시
+        self.frame_update_interval = 0.2
+
+        # 부모 영역이 정확히 4:3이므로 FILL을 사용해도
+        # 화면이 찌그러지거나 잘리지 않는다.
+        self.camera_image = ft.Image(
+            src="",
+            fit=ft.BoxFit.FILL,
+            gapless_playback=True,
+            visible=False,
+        )
+
+        self.camera_message = ft.Text(
+            "카메라 연결 없음",
+            size=t.SIZE_BODY,
+            color=t.TEXT_FAINT,
+        )
+
+        self.detection_text = ft.Text(
+            "검출 결과 없음",
+            size=t.SIZE_BODY,
+            color=t.TEXT_DIM,
+        )
+
+        self.action_text = ft.Text(
+            "-",
+            size=t.SIZE_VALUE,
+            color=t.TEXT,
+        )
+
+        self.reason_text = ft.Text(
+            "-",
+            size=t.SIZE_BODY,
+            color=t.TEXT_DIM,
+        )
+
+        self.stage_column = ft.Column(
+            spacing=7,
+            scroll=ft.ScrollMode.AUTO,
+            controls=[
+                stage_row(label, "todo")
+                for _, label in STAGES
+            ],
+        )
+
+        self.task_id_text = ft.Text("-", color=t.TEXT)
+        self.target_text = ft.Text("-", color=t.TEXT)
+        self.voice_text = ft.Text("-", color=t.TEXT)
+        self.status_text = ft.Text("-", color=t.TEXT)
+        self.elapsed_text = ft.Text("--:--", color=t.TEXT)
+        self.zone_text = ft.Text("-", color=t.TEXT)
+
+        # GitHub 기존 3D 지도 기능 유지
         self._map_view = MapView(width=480, height=280, show_robot=True)
-        map3d = panel(
-            "3D 지도",
-            content=ft.Container(
-                expand=True,
-                alignment=ft.Alignment.CENTER,
-                content=self._map_view.control,
+
+        self.control = self._build()
+
+    def _build(self):
+        # 640 × 480 영상과 동일한 4:3 비율
+        camera_view = ft.Container(
+            aspect_ratio=4 / 3,
+            bgcolor="#0A0D12",
+            border_radius=4,
+            clip_behavior=ft.ClipBehavior.HARD_EDGE,
+            content=ft.Stack(
+                fit=ft.StackFit.EXPAND,
+                controls=[
+                    # Stack 영역 전체를 이미지가 채움
+                    self.camera_image,
+
+                    # 카메라가 없을 때만 중앙 문구 표시
+                    ft.Container(
+                        alignment=ft.Alignment.CENTER,
+                        content=self.camera_message,
+                    ),
+                ],
             ),
         )
 
-        # TODO: 아래 4개 패널은 아직 snapshot을 안 쓴다. "다음 작업 순서"
-        # (PROGRESS.md 6장)에서 채운다.
         camera = panel(
             "현재 카메라 화면",
             content=ft.Column(
                 spacing=8,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                 controls=[
-                    ft.Container(
-                        expand=True,
-                        bgcolor="#0A0D12",
-                        border_radius=4,
-                        alignment=ft.Alignment.CENTER,
-                        content=ft.Text(
-                            "카메라 연결 없음",
-                            size=t.SIZE_BODY,
-                            color=t.TEXT_FAINT,
-                        ),
-                    ),
-                    ft.Text("검출 결과 없음", size=t.SIZE_BODY, color=t.TEXT_DIM),
+                    camera_view,
+                    self.detection_text,
                 ],
             ),
         )
@@ -106,29 +167,45 @@ class MonitorView:
                     ft.Column(
                         spacing=4,
                         controls=[
-                            ft.Text("현재 행동", size=t.SIZE_LABEL, color=t.TEXT_DIM),
-                            ft.Text("-", size=t.SIZE_VALUE, color=t.TEXT),
+                            ft.Text(
+                                "현재 행동",
+                                size=t.SIZE_LABEL,
+                                color=t.TEXT_DIM,
+                            ),
+                            self.action_text,
                         ],
                     ),
-                    ft.Divider(height=1, color=t.BORDER),
+                    ft.Divider(
+                        height=1,
+                        color=t.BORDER,
+                    ),
                     ft.Column(
                         spacing=4,
                         controls=[
-                            ft.Text("행동 이유", size=t.SIZE_LABEL, color=t.TEXT_DIM),
-                            ft.Text("-", size=t.SIZE_BODY, color=t.TEXT_DIM),
+                            ft.Text(
+                                "행동 이유",
+                                size=t.SIZE_LABEL,
+                                color=t.TEXT_DIM,
+                            ),
+                            self.reason_text,
                         ],
                     ),
                 ],
             ),
         )
 
+        map3d = panel(
+            "3D 지도",
+            content=ft.Container(
+                expand=True,
+                alignment=ft.Alignment.CENTER,
+                content=self._map_view.control,
+            ),
+        )
+
         stages = panel(
             "현재 실행 단계",
-            content=ft.Column(
-                spacing=7,
-                scroll=ft.ScrollMode.AUTO,
-                controls=[stage_row(label, "todo") for _, label in STAGES],
-            ),
+            content=self.stage_column,
         )
 
         info = panel(
@@ -140,38 +217,294 @@ class MonitorView:
                         spacing=6,
                         expand=1,
                         controls=[
-                            kv("작업 ID", "-", mono=True),
-                            kv("대상 물체", "-"),
-                            kv("음성 명령", "-"),
+                            ft.Row(
+                                controls=[
+                                    ft.Text(
+                                        "작업 ID",
+                                        color=t.TEXT_DIM,
+                                    ),
+                                    self.task_id_text,
+                                ],
+                            ),
+                            ft.Row(
+                                controls=[
+                                    ft.Text(
+                                        "대상 물체",
+                                        color=t.TEXT_DIM,
+                                    ),
+                                    self.target_text,
+                                ],
+                            ),
+                            ft.Row(
+                                controls=[
+                                    ft.Text(
+                                        "음성 명령",
+                                        color=t.TEXT_DIM,
+                                    ),
+                                    self.voice_text,
+                                ],
+                            ),
                         ],
                     ),
                     ft.Column(
                         spacing=6,
                         expand=1,
                         controls=[
-                            kv("작업 상태", "-"),
-                            kv("경과 시간", "--:--", mono=True),
-                            kv("현재 구역", "-", mono=True),
+                            ft.Row(
+                                controls=[
+                                    ft.Text(
+                                        "작업 상태",
+                                        color=t.TEXT_DIM,
+                                    ),
+                                    self.status_text,
+                                ],
+                            ),
+                            ft.Row(
+                                controls=[
+                                    ft.Text(
+                                        "경과 시간",
+                                        color=t.TEXT_DIM,
+                                    ),
+                                    self.elapsed_text,
+                                ],
+                            ),
+                            ft.Row(
+                                controls=[
+                                    ft.Text(
+                                        "현재 구역",
+                                        color=t.TEXT_DIM,
+                                    ),
+                                    self.zone_text,
+                                ],
+                            ),
                         ],
                     ),
-                    ft.Container(expand=2, content=ft.Text("탐색 영역 상태 표", size=t.SIZE_BODY, color=t.TEXT_FAINT)),
+                    ft.Container(
+                        expand=2,
+                        content=ft.Text(
+                            "탐색 영역 상태 표",
+                            size=t.SIZE_BODY,
+                            color=t.TEXT_FAINT,
+                        ),
+                    ),
                 ],
             ),
         )
 
-        self.control = ft.Column(
+        return ft.Column(
             spacing=t.GAP,
             controls=[
-                ft.Row([camera, action], spacing=t.GAP, expand=3),
-                ft.Row([map3d, stages], spacing=t.GAP, expand=3),
-                ft.Row([info], spacing=t.GAP, expand=2),
+                # 1. 현재 카메라 화면 / 3. 3D 지도
+                ft.Row(
+                    spacing=t.GAP,
+                    expand=6,
+                    vertical_alignment=(
+                        ft.CrossAxisAlignment.STRETCH
+                    ),
+                    controls=[
+                        ft.Container(
+                            content=camera,
+                            expand=3,
+                        ),
+                        ft.Container(
+                            content=map3d,
+                            expand=4,
+                        ),
+                    ],
+                ),
+
+                # 2. 현재 판단과 행동 / 4. 현재 실행 단계
+                ft.Row(
+                    spacing=t.GAP,
+                    expand=2,
+                    vertical_alignment=(
+                        ft.CrossAxisAlignment.STRETCH
+                    ),
+                    controls=[
+                        ft.Container(
+                            content=action,
+                            expand=3,
+                        ),
+                        ft.Container(
+                            content=stages,
+                            expand=4,
+                        ),
+                    ],
+                ),
+
+                # 5. 작업 정보
+                ft.Row(
+                    spacing=t.GAP,
+                    expand=2,
+                    controls=[
+                        info,
+                    ],
+                ),
             ],
         )
-        self.update(None)
 
-    def update(self, snapshot: dict | None):
-        task = (snapshot or {}).get("task", {})
-        zones = (snapshot or {}).get("zones", [])
-        objects = (snapshot or {}).get("objects", [])
-        robot = (snapshot or {}).get("robot") or {}
-        self._map_view.update(zones, task.get("current_zone"), objects, robot.get("links"))
+    def update(self, snapshot):
+        if not snapshot:
+            return
+
+        system = snapshot.get("system", {})
+        task = snapshot.get("task", {})
+
+        # GitHub 기존 MapView 실데이터 연결 유지
+        zones = snapshot.get("zones", [])
+        objects = snapshot.get("objects", [])
+        robot = snapshot.get("robot") or {}
+        self._map_view.update(
+            zones,
+            task.get("current_zone"),
+            objects,
+            robot.get("links"),
+        )
+
+        camera_connected = system.get(
+            "camera_connected",
+            False,
+        )
+        frame_id = snapshot.get("frame_id")
+
+        if camera_connected and frame_id is not None:
+            now = time.monotonic()
+
+            should_update = (
+                frame_id != self.last_frame_id
+                and now - self.last_frame_update
+                >= self.frame_update_interval
+            )
+
+            if should_update:
+                self.camera_image.src = (
+                    f"{cfg.BASE_URL}"
+                    f"{cfg.FRAME_PATH}"
+                    f"?id={frame_id}"
+                )
+
+                self.last_frame_id = frame_id
+                self.last_frame_update = now
+
+            self.camera_image.visible = True
+            self.camera_message.visible = False
+
+        else:
+            self.camera_image.visible = False
+            self.camera_message.visible = True
+            self.camera_message.value = (
+                "카메라 연결 없음"
+            )
+
+        detections = task.get("detections", [])
+
+        if detections:
+            detection_labels = []
+
+            for item in detections:
+                label = item.get("label", "-")
+                confidence = item.get("confidence")
+
+                if confidence is None:
+                    detection_labels.append(label)
+                else:
+                    detection_labels.append(
+                        f"{label}  "
+                        f"confidence {confidence:.2f}"
+                    )
+
+            self.detection_text.value = " / ".join(
+                detection_labels
+            )
+
+        else:
+            self.detection_text.value = (
+                "현재 시야에서 대상 물체를 "
+                "찾지 못했습니다."
+            )
+
+        self.action_text.value = (
+            task.get("action") or "-"
+        )
+
+        self.reason_text.value = (
+            task.get("action_reason") or "-"
+        )
+
+        current_stage = task.get(
+            "stage",
+            "idle",
+        )
+
+        stage_codes = [
+            code
+            for code, _ in STAGES
+        ]
+
+        try:
+            current_index = stage_codes.index(
+                current_stage
+            )
+        except ValueError:
+            current_index = 0
+
+        self.stage_column.controls = []
+
+        for index, (_, label) in enumerate(STAGES):
+            if index < current_index:
+                row_state = "done"
+
+            elif index == current_index:
+                row_state = "current"
+
+            else:
+                row_state = "todo"
+
+            self.stage_column.controls.append(
+                stage_row(
+                    label,
+                    row_state,
+                )
+            )
+
+        self.task_id_text.value = (
+            task.get("task_id") or "-"
+        )
+
+        self.target_text.value = (
+            task.get("target_name") or "-"
+        )
+
+        self.voice_text.value = (
+            task.get("voice_command") or "-"
+        )
+
+        self.status_text.value = (
+            task.get("status") or "-"
+        )
+
+        elapsed_sec = int(
+            task.get("elapsed_sec", 0)
+        )
+
+        minutes, seconds = divmod(
+            elapsed_sec,
+            60,
+        )
+
+        self.elapsed_text.value = (
+            f"{minutes:02d}:{seconds:02d}"
+        )
+
+        self.zone_text.value = (
+            task.get("current_zone") or "-"
+        )
+
+
+def build_monitor(snapshot=None):
+    view = MonitorView()
+
+    if snapshot:
+        view.update(snapshot)
+
+    return view.control

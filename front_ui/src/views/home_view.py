@@ -1,12 +1,12 @@
 """홈 화면.
 
 ┌──────────────────┬──────────────────┐
-│ 현재 작업 상태     │                   │
-├──────────────────┤  물체 위치 3D 맵   │
-│ 로봇 시스템 상태   │                   │
+│ 현재 작업 상태     │ 로봇 시스템 상태   │
 ├──────────────────┼──────────────────┤
-│ 최근 실행 경과     │ 찾고 있는 3d 모델  │
-└──────────────────┴──────────────────┘
+│ 찾고 있는 3d 모델  │ 물체 위치 3D 맵    │
+├──────────────────┴──────────────────┤
+│ 최근 실행 경과                        │
+└─────────────────────────────────────┘
 
 HomeView는 화면 구조를 한 번만 만들고, 새 스냅샷이 올 때마다 update()가 각
 패널의 안쪽 content만 다시 만들어 끼워 넣는다(패널 박스 자체는 그대로).
@@ -70,51 +70,7 @@ def _format_elapsed(seconds) -> str:
     return f"{seconds // 60:02d}:{seconds % 60:02d}"
 
 
-def _format_time(iso_str: str | None) -> str:
-    """ISO 8601(`recent_tasks[].ended_at`)에서 시:분만 뽑는다. 표 한 줄에
-    날짜까지 넣기엔 자리가 좁고, "최근" 목록이라 날짜보단 시각이 더 유용하다.
-    형식이 이상해도 죽지 않고 원본을 그대로 보여준다."""
-    if not iso_str:
-        return L.EMPTY
-    try:
-        return iso_str.split("T")[1][:5]
-    except (IndexError, AttributeError):
-        return iso_str
-
-
-def _recent_task_row(task: dict) -> ft.Control:
-    """최근 실행 경과 한 줄: 시각 | 대상 물체 | 결과 | 소요 시간."""
-    return ft.Row(
-        spacing=10,
-        vertical_alignment=ft.CrossAxisAlignment.CENTER,
-        controls=[
-            ft.Text(
-                _format_time(task.get("ended_at")),
-                size=t.SIZE_BODY,
-                color=t.TEXT_DIM,
-                font_family=t.MONO,
-                width=48,
-            ),
-            ft.Text(
-                task.get("target_name") or L.EMPTY,
-                size=t.SIZE_BODY,
-                color=t.TEXT,
-                expand=True,
-                overflow=ft.TextOverflow.ELLIPSIS,
-            ),
-            st.task_status(task.get("result")),
-            ft.Text(
-                _format_elapsed(task.get("duration_sec")),
-                size=t.SIZE_BODY,
-                color=t.TEXT_DIM,
-                font_family=t.MONO,
-                width=44,
-            ),
-        ],
-    )
-
-
-def _stage_progress_ring(stage: str | None, status: str | None, size: int = 64) -> ft.Control:
+def _stage_progress_ring(stage: str | None, status: str | None) -> ft.Control:
     """STAGE_ORDER 상 현재 단계 위치를 원형 진행률로 보여준다.
 
     스키마에 progress(%) 필드가 따로 없어서, task.stage가 STAGES 순서 중
@@ -133,7 +89,7 @@ def _stage_progress_ring(stage: str | None, status: str | None, size: int = 64) 
     else:
         color = t.ACCENT
 
-    stroke_width = max(6, round(size / 12))  # 커질수록 굵기도 같이 키운다
+    size = 64
     return ft.Stack(
         width=size,
         height=size,
@@ -142,7 +98,7 @@ def _stage_progress_ring(stage: str | None, status: str | None, size: int = 64) 
                 value=value,
                 width=size,
                 height=size,
-                stroke_width=stroke_width,
+                stroke_width=6,
                 color=color,
                 bgcolor=t.SURFACE_ALT,
             ),
@@ -152,7 +108,7 @@ def _stage_progress_ring(stage: str | None, status: str | None, size: int = 64) 
                 alignment=ft.Alignment.CENTER,
                 content=ft.Text(
                     f"{round(value * 100)}%",
-                    size=t.SIZE_BIG if size >= 100 else t.SIZE_LABEL,
+                    size=t.SIZE_LABEL,
                     color=t.TEXT,
                     weight=ft.FontWeight.W_600,
                 ),
@@ -225,9 +181,7 @@ class HomeView:
     """`.control`은 한 번만 만들고, `.update(snapshot)`으로 값만 갱신한다."""
 
     def __init__(self):
-        self._current_task_body = ft.Row(
-            spacing=16, vertical_alignment=ft.CrossAxisAlignment.CENTER, controls=[]
-        )
+        self._current_task_body = ft.Column(spacing=8, controls=[])
         self._system_state_body = ft.Column(spacing=10, controls=[])
         self._target_model_body = ft.Container(alignment=ft.Alignment.CENTER)
         self._target_id_shown = object()  # target_id와 절대 안 같을 초기값
@@ -240,72 +194,21 @@ class HomeView:
         )
         target_model_panel = panel("찾고 있는 3d 모델", content=self._target_model_body)
 
-        # dummy_points 성능 테스트는 끝났으니 껐다 (필요하면 다시 켤 수 있게
-        # 인자만 남겨둔다). show_robot=True: 홈과 "작업" 화면(monitor_view.py의
-        # MonitorView)의 3D 지도는 이제 같은 내용을 보여준다 — 로봇 팔 포함.
-        # 캔버스를 640x480으로 키우고(오른쪽 컬럼이 세로로 훨씬 커져서, 이전
-        # 520x280은 가운데 작게 떠 있었다) scale도 같이 키워서(300->430) 그
-        # 안의 장면도 새 크기에 맞게 커 보이게 했다 — 캔버스만 키우면 여백만
-        # 늘고 내용은 그대로 작다.
+        # TODO(3d_map_spec 구현 순서 4~6): 바닥판·로봇 마커까지 됐고, 책상/벽/
+        # zones/objects는 아직이다. dummy_points 성능 테스트는 끝났으니 껐다
+        # (필요하면 다시 켤 수 있게 인자만 남겨둔다).
         # 카메라 회전 상태를 유지해야 해서 update()에서는 절대 다시 안 만든다
         # (ObjectViewer와 같은 이유 — home_view.py 상단 주석 참고).
-        self._object_map_view = MapView(
-            width=640, height=480, dummy_points=0, show_robot=True, scale=430.0
-        )
-        object_map_panel = panel(
-            "물체 위치 3D 맵",
-            content=ft.Container(
-                expand=True,
-                alignment=ft.Alignment.CENTER,
-                content=self._object_map_view.control,
-            ),
-        )
-        self._recent_body = ft.Column(spacing=6, controls=[])
-        recent_header = ft.Row(
-            spacing=10,
-            controls=[
-                ft.Text("시각", size=t.SIZE_LABEL, color=t.TEXT_FAINT, width=48),
-                ft.Text("대상 물체", size=t.SIZE_LABEL, color=t.TEXT_FAINT, expand=True),
-                ft.Text("결과", size=t.SIZE_LABEL, color=t.TEXT_FAINT, width=60),
-                ft.Text("소요", size=t.SIZE_LABEL, color=t.TEXT_FAINT, width=44),
-            ],
-        )
-        recent_panel = panel(
-            "최근 실행 경과",
-            content=ft.Column(
-                spacing=8,
-                controls=[
-                    recent_header,
-                    ft.Divider(height=1, color=t.BORDER),
-                    self._recent_body,
-                ],
-            ),
-        )
+        self._object_map_view = MapView(width=520, height=280, dummy_points=0)
+        object_map_panel = panel("물체 위치 3D 맵", content=self._object_map_view.control)
+        recent_panel = panel("최근 실행 경과")
 
-        # panel()이 만드는 Container는 자기 자신에 expand=True(=flex 1)를
-        # 이미 박아놨다 — 세로 비율(3:3:2, 6:2)은 그걸 다시 Container로
-        # 한 겹 더 감싸서 그 바깥 Container의 expand 값으로 준다.
-        self.control = ft.Row(
+        self.control = ft.Column(
             spacing=t.GAP,
-            expand=True,
             controls=[
-                ft.Column(
-                    spacing=t.GAP,
-                    expand=1,
-                    controls=[
-                        ft.Container(expand=3, content=current_task_panel),
-                        ft.Container(expand=3, content=system_state_panel),
-                        ft.Container(expand=2, content=recent_panel),
-                    ],
-                ),
-                ft.Column(
-                    spacing=t.GAP,
-                    expand=1,
-                    controls=[
-                        ft.Container(expand=6, content=object_map_panel),
-                        ft.Container(expand=2, content=target_model_panel),
-                    ],
-                ),
+                ft.Row([current_task_panel, system_state_panel], spacing=t.GAP, expand=3),
+                ft.Row([target_model_panel, object_map_panel], spacing=t.GAP, expand=3),
+                ft.Row([recent_panel], spacing=t.GAP, expand=2),
             ],
         )
         self.update(None)
@@ -315,29 +218,30 @@ class HomeView:
         task = (snapshot or {}).get("task", {})
         objects = (snapshot or {}).get("objects", [])
 
-        # 왼쪽 절반 = 원형 진행률(크게), 오른쪽 절반 = 나머지 정보 전부.
         self._current_task_body.controls = [
-            ft.Container(
-                expand=1,
-                alignment=ft.Alignment.CENTER,
-                content=_stage_progress_ring(task.get("stage"), task.get("status"), size=140),
-            ),
-            ft.Column(
-                expand=1,
-                spacing=8,
+            ft.Row(
+                spacing=14,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 controls=[
-                    ft.Text(
-                        task.get("target_name") or "탐색 중인 물체 없음",
-                        size=t.SIZE_BIG,
-                        color=t.TEXT if task else t.TEXT_FAINT,
+                    _stage_progress_ring(task.get("stage"), task.get("status")),
+                    ft.Column(
+                        spacing=6,
+                        expand=True,
+                        controls=[
+                            ft.Text(
+                                task.get("target_name") or "탐색 중인 물체 없음",
+                                size=t.SIZE_BIG,
+                                color=t.TEXT if task else t.TEXT_FAINT,
+                            ),
+                            _kv_control("작업 상태", st.task_status(task.get("status"))),
+                        ],
                     ),
-                    _kv_control("작업 상태", st.task_status(task.get("status"))),
-                    ft.Divider(height=1, color=t.BORDER),
-                    kv("현재 단계", L.get(L.STAGE, task.get("stage"))),
-                    kv("경과 시간", _format_elapsed(task.get("elapsed_sec")), mono=True),
-                    kv("음성 명령", task.get("voice_command") or L.EMPTY),
                 ],
             ),
+            ft.Divider(height=1, color=t.BORDER),
+            kv("현재 단계", L.get(L.STAGE, task.get("stage"))),
+            kv("경과 시간", _format_elapsed(task.get("elapsed_sec")), mono=True),
+            kv("음성 명령", task.get("voice_command") or L.EMPTY),
         ]
 
         self._system_state_body.controls = [
@@ -370,20 +274,3 @@ class HomeView:
         if target_id != self._target_id_shown:
             self._target_id_shown = target_id
             self._target_model_body.content = _target_model_content(task, objects)
-
-        # MapView는 자기 자신(.control)을 안 바꾸고 내부 shapes만 갱신한다 —
-        # zones/open_ratio는 명세 7장대로 매 폴링 다시 계산해야 한다(캐시 금지).
-        # "작업" 화면(MonitorView)과 같은 내용을 보여주니 robot_links도 같이 넘긴다.
-        zones = (snapshot or {}).get("zones", [])
-        robot = (snapshot or {}).get("robot") or {}
-        self._object_map_view.update(zones, task.get("current_zone"), objects, robot.get("links"))
-
-        # 명세: recent_tasks 최근 5건, 한 줄씩. 데이터 없을 때 패널을 비워두지
-        # 않고 안내 문구를 띄운다(CLAUDE.md 코드 규칙).
-        recent_tasks = (snapshot or {}).get("recent_tasks") or []
-        if recent_tasks:
-            self._recent_body.controls = [_recent_task_row(t_) for t_ in recent_tasks[:5]]
-        else:
-            self._recent_body.controls = [
-                ft.Text("최근 실행 기록 없음", size=t.SIZE_BODY, color=t.TEXT_FAINT)
-            ]
