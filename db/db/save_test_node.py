@@ -6,9 +6,8 @@
 
   1) 테스트 데이터 생성   -> /db/save
   2) 전체 목록 출력       -> /db/load  {}
-  3) 이름으로 검색        -> /db/load  {"name": "컵"}
-  4) 클래스로 검색        -> /db/load  {"class_label": "cup"}
-  5) 직접 등록            -> /db/save  (입력받은 1건)
+  3) class_name 으로 검색 -> /db/load  {"class_name": "green_frog"}
+  4) 직접 등록            -> /db/save  (입력받은 1건)
   8) 전체 삭제            -> /db/clear (되돌릴 수 없음)
   9) 초기화 확인          -> /db/init
   0) 종료
@@ -23,23 +22,25 @@ from std_srvs.srv import Trigger
 from interfaces.srv import DbLoad, DbSave, NodeInit
 
 
-# 탐색 작업 1회분 = 리스트 1개. 호출할 때마다 다음 회차가 나간다
+# 탐색 작업 1회분 = 리스트 1개. 호출할 때마다 다음 회차가 나간다.
+# class_name 은 voice_command 가 아는 등록 물체 6종 중에서 썼다(x/y/z는
+# 비전 좌표계 예시값, 단위는 비전이 실제로 주는 그대로다 — mm로 보임).
 TEST_RUNS = [
     # 1회차 — 3개 신규 등록
     [
-        {'name': '컵',     'class_label': 'cup',     'location': '주방 싱크대', 'confidence': 0.92},
-        {'name': '리모컨', 'class_label': 'remote',  'location': '거실 소파',   'confidence': 0.88},
-        {'name': '안경',   'class_label': 'glasses', 'location': '침실 책상',   'confidence': 0.75},
+        {'class_name': 'green_frog',    'confidence': 0.92, 'x': 412.5, 'y': -135.8, 'z': 125.3},
+        {'class_name': 'white_bear',    'confidence': 0.88, 'x': 505.2, 'y': 82.4,   'z': 118.9},
+        {'class_name': 'aircon_remote', 'confidence': 0.75, 'x': 300.0, 'y': 10.0,   'z': 90.0},
     ],
-    # 2회차 — 컵은 이동(갱신), 책은 신규, 리모컨은 못 봄(그대로 유지)
+    # 2회차 — green_frog는 이동(갱신), yellow_can은 신규, white_bear는 못 봄(그대로 유지)
     [
-        {'name': '컵', 'class_label': 'cup',  'location': '거실 테이블', 'confidence': 0.81},
-        {'name': '책', 'class_label': 'book', 'location': '침실 책상',   'confidence': 0.69},
+        {'class_name': 'green_frog', 'confidence': 0.81, 'x': 380.0, 'y': -90.0, 'z': 120.0},
+        {'class_name': 'yellow_can', 'confidence': 0.69, 'x': 250.0, 'y': 60.0,  'z': 95.0},
     ],
-    # 3회차 — 같은 이름이 배치 안에 두 번. 뒤에 것이 최종 위치가 된다
+    # 3회차 — 같은 class_name이 배치 안에 두 번. 뒤에 것이 최종 위치가 된다
     [
-        {'name': '컵', 'class_label': 'cup', 'location': '식탁',   'confidence': 0.70},
-        {'name': '컵', 'class_label': 'cup', 'location': '베란다', 'confidence': 0.85},
+        {'class_name': 'green_frog', 'confidence': 0.70, 'x': 100.0, 'y': 0.0,  'z': 110.0},
+        {'class_name': 'green_frog', 'confidence': 0.85, 'x': 120.0, 'y': 20.0, 'z': 112.0},
     ],
 ]
 
@@ -47,9 +48,8 @@ MENU = """
 ==================================
   1) 테스트 데이터 생성 (다음 회차)
   2) 전체 목록 출력
-  3) 이름으로 검색
-  4) 클래스로 검색
-  5) 직접 등록
+  3) class_name 으로 검색
+  4) 직접 등록
   8) 전체 삭제 (되돌릴 수 없음)
   9) 초기화 확인 (/db/init)
   0) 종료
@@ -90,10 +90,10 @@ class DBTestNode(Node):
         return future.result()
 
     # ------------------------------------------------------------------
-    def send_save(self, items, source):
+    def send_save(self, rows):
         req = DbSave.Request()
         req.request = json.dumps(
-            {'source': source, 'items': items}, ensure_ascii=False)
+            {'table': 'items', 'rows': rows}, ensure_ascii=False)
 
         res = self.call(self.save_cli, req)
         if res is None:
@@ -104,7 +104,7 @@ class DBTestNode(Node):
             data = json.loads(res.response)
             for r in data['results']:
                 mark = '신규' if r['action'] == 'insert' else '갱신'
-                print(f'    {mark}  id={r["id"]}  {r["name"]}')
+                print(f'    {mark}  id={r["id"]}  {r["class_name"]}')
 
     def send_load(self, payload, title):
         req = DbLoad.Request()
@@ -124,8 +124,8 @@ class DBTestNode(Node):
             print('    (없음)')
             return
         for it in data['items']:
-            print(f'    [{it["id"]}] {it["name"]} ({it["class_label"]}) '
-                  f'@ {it["location"]}  / {it["last_seen"]}')
+            print(f'    [{it["id"]}] {it["class_name"]} (conf={it["confidence"]}) '
+                  f'@ ({it["x"]}, {it["y"]}, {it["z"]})  / {it["last_seen"]}')
 
     # ------------------------------------------------------------------
     def menu_generate(self):
@@ -133,24 +133,37 @@ class DBTestNode(Node):
             self.run_index = 0
             print('  (마지막 회차까지 다 보내서 1회차로 되돌아갑니다)')
 
-        items = TEST_RUNS[self.run_index]
+        rows = TEST_RUNS[self.run_index]
         label = self.run_index + 1
-        print(f'  {label}회차 {len(items)}건 전송: '
-              + ', '.join(f'{i["name"]}@{i["location"]}' for i in items))
-        self.send_save(items, source=f'test_run{label}')
+        print(f'  {label}회차 {len(rows)}건 전송: '
+              + ', '.join(f'{r["class_name"]}@({r["x"]},{r["y"]},{r["z"]})' for r in rows))
+        self.send_save(rows)
         self.run_index += 1
 
     def menu_manual(self):
-        name = input('  이름: ').strip()
-        label = input('  클래스명: ').strip()
-        location = input('  위치: ').strip()
-        if not name or not location:
-            print('  !! 이름과 위치는 필수입니다')
+        print('  (이미 있는 class_name을 또 넣으면 새로 안 생기고 값만 갱신됩니다'
+              ' — upsert 확인용으로 같은 이름을 값만 바꿔서 여러 번 넣어보세요)')
+        class_name = input('  class_name: ').strip()
+        if not class_name:
+            print('  !! class_name은 필수입니다')
             return
-        self.send_save(
-            [{'name': name, 'class_label': label, 'location': location,
-              'confidence': 1.0}],
-            source='manual')
+        try:
+            x = float(input('  x: ').strip())
+            y = float(input('  y: ').strip())
+            z = float(input('  z: ').strip())
+        except ValueError:
+            print('  !! x/y/z는 숫자여야 합니다')
+            return
+
+        conf_raw = input('  confidence (그냥 엔터 = 1.0): ').strip()
+        try:
+            confidence = float(conf_raw) if conf_raw else 1.0
+        except ValueError:
+            print('  !! confidence는 숫자여야 합니다')
+            return
+
+        self.send_save([{'class_name': class_name, 'confidence': confidence,
+                          'x': x, 'y': y, 'z': z}])
 
     def menu_clear(self):
         print('  !! items 를 전부 지웁니다. 되돌릴 수 없습니다.')
@@ -196,12 +209,9 @@ class DBTestNode(Node):
             elif choice == '2':
                 self.send_load({}, '전체 목록')
             elif choice == '3':
-                name = input('  검색할 이름: ').strip()
-                self.send_load({'name': name}, f"'{name}' 검색 결과")
+                class_name = input('  검색할 class_name: ').strip()
+                self.send_load({'class_name': class_name}, f"'{class_name}' 검색 결과")
             elif choice == '4':
-                label = input('  검색할 클래스명: ').strip()
-                self.send_load({'class_label': label}, f"'{label}' 검색 결과")
-            elif choice == '5':
                 self.menu_manual()
             elif choice == '8':
                 self.menu_clear()
@@ -211,7 +221,7 @@ class DBTestNode(Node):
                 print('종료합니다')
                 break
             else:
-                print('  !! 0~5, 8, 9 중에서 선택하세요')
+                print('  !! 0~4, 8, 9 중에서 선택하세요')
 
 
 def main(args=None):
