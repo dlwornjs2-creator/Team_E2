@@ -22,6 +22,8 @@ from openai import OpenAI
 from rclpy.node import Node
 
 from interfaces.srv import TargetSearch
+from ament_index_python.packages import get_package_share_directory
+
 
 VALID_MODEL_NAMES = {
     "yellow_can",
@@ -41,6 +43,11 @@ MODEL_DESCRIPTIONS = {
     "otter_in_can": "통 안에 있는 흰색/아이보리 수달 인형",
 }
 
+default_env_file = (
+    Path(get_package_share_directory("voice_command"))
+    / "resource"
+    / ".env"
+)
 
 class ObjectNameResolver:
     def __init__(self, api_key: str, model: str) -> None:
@@ -127,7 +134,7 @@ class StateTriggerClient(Node):
 def main() -> int:
     parser = argparse.ArgumentParser(description="STT + GPT -> TargetSearch ROS 2 service client")
     parser.add_argument("--sm-service", default="/state/target_search")
-    parser.add_argument("--env-file", default="~/Any6D/.env")
+    parser.add_argument("--env-file", default=str(default_env_file))
     parser.add_argument("--record-seconds", type=float, default=5.0)
     parser.add_argument("--service-wait", type=float, default=10.0)
     args = parser.parse_args()
