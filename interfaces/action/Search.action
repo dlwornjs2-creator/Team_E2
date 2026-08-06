@@ -1,0 +1,10 @@
+# 상태 노드 -> 작업 노드 (탐색 실행)
+string target_name
+string class_label
+---
+bool success
+string location
+string message
+---
+string step
+float32 progress

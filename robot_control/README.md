@@ -112,8 +112,7 @@ home_joint = (0.0, 0.0, 90.0, 0.0, 90.0, 180.0)
 enable_motion = True
 
 input_mode = "any6d"
-detection_service = "/any6d/detect"
-expected_base_frame = "base"
+detection_service = "/find_object_pose"
 pose_is_tcp_grasp = True
 ```
 
@@ -139,7 +138,7 @@ DB 조회 결과에 유효한 `location`이 없으면 다음 네 구역을 순�
 각 구역에 도착한 뒤 제어 노드는 Any6D 실행 노드의 서비스를 호출합니다.
 
 ```text
-/any6d/detect (interfaces/srv/DetectObject)
+/find_object_pose (interfaces/srv/DetectObject)
 ```
 
 서비스의 `request` 문자열에 들어가는 목표물 요청 JSON 예시:
@@ -268,6 +267,25 @@ ros2 run db db
 
 ### 3. 모듈형 robot_control
 
+먼저 Any6D conda 환경에서 검출 서버를 실행합니다. 이 서버는 카메라 좌표계의
+자세만 반환하며 로봇을 직접 움직이지 않습니다.
+
+```bash
+cd ~/Any6D
+conda activate <Any6D 환경 이름>
+source /opt/ros/humble/setup.bash
+source ~/cobot_ws/install/setup.bash
+python dino_any6d_with_control.py --service /find_object_pose
+```
+
+다른 터미널에서 서비스가 준비되었는지 확인합니다.
+
+```bash
+ros2 service type /find_object_pose
+```
+
+출력은 `interfaces/srv/DetectObject`여야 합니다.
+
 ```bash
 cd ~/cobot_ws
 source /opt/ros/humble/setup.bash
@@ -306,6 +324,32 @@ ros2 run state state_node --ros-args \
 
 ## 작업 요청 형식
 
+### 상태 노드 액션 (기본 인터페이스)
+
+상태 노드는 `/control/search` 액션으로 탐색 및 pick 작업을 요청합니다.
+
+```text
+/control/search (interfaces/action/Search)
+```
+
+터미널 호출 예시:
+
+```bash
+ros2 action send_goal /control/search interfaces/action/Search \
+  "{target_name: aircon_remote, class_label: aircon_remote}" \
+  --feedback
+```
+
+Goal을 받으면 기존 작업 큐와 동일하게 DB 조회, 탐색 구역 이동, Any6D 검출,
+pick 및 홈 복귀를 수행합니다. 진행 중에는 `step`과 `progress` feedback을
+전송합니다. 성공 Result의 `location`은 DB 등록 위치 또는
+`search_zone_1`~`search_zone_4`이며, 찾지 못하면 빈 문자열입니다.
+
+실행 중인 실제 로봇 모션은 액션 cancel로 안전하게 정지시킬 수 없으므로 cancel
+요청을 거절합니다. 아직 큐에서 시작하지 않은 Goal만 취소할 수 있습니다.
+
+### 호환 서비스
+
 서비스:
 
 ```text
@@ -328,8 +372,12 @@ JSON 예시:
 
 ```bash
 ros2 service call /control/task interfaces/srv/ControlTask \
-  "{request: '{\"task_id\":\"pick-001\",\"name\":\"빨간 컵\",\"class_label\":\"cup\",\"command\":\"pick\",\"requested_by\":\"state_node\"}'}"
+  "{request: '{\"task_id\":\"test-task\",\"name\":\"aircon_remote\",\"class_label\":\"aircon_remote\",\"command\":\"pick\",\"requested_by\":\"operator\"}'}"
 ```
+
+이 요청이 실제 pick 흐름의 시작점입니다. 제어 노드는 작업을 접수한 뒤 내부적으로
+`/find_object_pose`를 호출합니다. `/find_object_pose`를 터미널에서 직접 호출하는
+것은 카메라·Any6D 단독 진단용이며 pick을 시작하지 않습니다.
 
 작업 요청 후 제어 노드는 다음 순서로 처리합니다.
 
@@ -382,12 +430,12 @@ ros2 service call /control/task interfaces/srv/ControlTask \
 서비스:
 
 ```text
-/any6d/detect (interfaces/srv/DetectObject)
+/find_object_pose (interfaces/srv/DetectObject)
 ```
 
 요구 조건:
 
-- `header.frame_id`는 `base`
+- `pose.frame_id`는 기본적으로 `camera_color_optical_frame`
 - 탐지노드 입력 위치 단위는 **m**
 - 입력 방향은 카메라 좌표계 기준 quaternion `(x, y, z, w)`
 - 제어 노드가 현재 TCP 자세와 eye-in-hand 보정 행렬을 사용해 Base 좌표로 변환

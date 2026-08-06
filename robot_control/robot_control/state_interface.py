@@ -1,4 +1,4 @@
-"""Service-only interface between the state node and robot controller."""
+"""Service/action interface between the state node and robot controller."""
 
 from __future__ import annotations
 
@@ -7,8 +7,11 @@ import threading
 from collections import deque
 from typing import Any, Callable, Optional
 
+from interfaces.action import Search
 from interfaces.srv import ControlTask, NodeInit, RobotResult
+from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.node import Node
+from rclpy.task import Future
 
 from .config import InterfaceConfig
 from .models import RobotTask, TaskOutcome
@@ -19,7 +22,7 @@ AcceptanceGuard = Callable[[], Optional[str]]
 
 
 class StateInterface:
-    """Receive task services and send lifecycle events through a service."""
+    """Receive service/action tasks and publish their lifecycle."""
 
     def __init__(
         self,
@@ -41,6 +44,9 @@ class StateInterface:
         self._active: Optional[RobotTask] = None
         self._known_task_ids: set[str] = set()
         self._result_futures: set[Any] = set()
+        self._action_handles: dict[str, Any] = {}
+        self._action_futures: dict[str, Future] = {}
+        self._action_locations: dict[str, str] = {}
 
         self.init_service = node.create_service(
             NodeInit,
@@ -51,6 +57,15 @@ class StateInterface:
             ControlTask,
             config.control_task_service,
             self._on_task_request,
+        )
+        self.search_action = ActionServer(
+            node,
+            Search,
+            config.control_search_action,
+            execute_callback=self._execute_search,
+            goal_callback=self._on_search_goal,
+            cancel_callback=self._on_search_cancel,
+            handle_accepted_callback=self._on_search_accepted,
         )
         self.result_client = node.create_client(
             RobotResult,
@@ -173,6 +188,119 @@ class StateInterface:
         response.message = rejection or "작업 요청을 접수했습니다"
         return response
 
+    def _task_from_search_goal(self, goal_request, task_id: str) -> RobotTask:
+        payload = {
+            "task_id": task_id,
+            "target_name": goal_request.target_name,
+            "class_label": goal_request.class_label,
+            "command": "search_and_pick",
+            "requested_by": "state_node_action",
+        }
+        return self._parse_task(json.dumps(payload, ensure_ascii=False))
+
+    def _on_search_goal(self, goal_request) -> GoalResponse:
+        try:
+            self._task_from_search_goal(goal_request, "goal-validation")
+        except ValueError as error:
+            self.node.get_logger().warning(f"Search goal rejected: {error}")
+            return GoalResponse.REJECT
+        with self._lock:
+            rejection = (
+                not self._ready
+                or self._active is not None
+                or len(self._pending) >= self.config.max_pending_tasks
+            )
+        if rejection or self.acceptance_guard():
+            return GoalResponse.REJECT
+        return GoalResponse.ACCEPT
+
+    def _on_search_accepted(self, goal_handle) -> None:
+        task_id = f"search-{bytes(goal_handle.goal_id.uuid).hex()}"
+        task = self._task_from_search_goal(goal_handle.request, task_id)
+        result_future = Future()
+        with self._lock:
+            self._known_task_ids.add(task_id)
+            self._pending.append(task)
+            self._action_handles[task_id] = goal_handle
+            self._action_futures[task_id] = result_future
+            self._action_locations[task_id] = ""
+        goal_handle.execute()
+
+    async def _execute_search(self, goal_handle):
+        task_id = f"search-{bytes(goal_handle.goal_id.uuid).hex()}"
+        with self._lock:
+            result_future = self._action_futures[task_id]
+        result = await result_future
+        with self._lock:
+            self._action_handles.pop(task_id, None)
+            self._action_futures.pop(task_id, None)
+            self._action_locations.pop(task_id, None)
+        return result
+
+    def _on_search_cancel(self, goal_handle) -> CancelResponse:
+        task_id = f"search-{bytes(goal_handle.goal_id.uuid).hex()}"
+        with self._lock:
+            if self._active is not None and self._active.task_id == task_id:
+                # A running robot motion cannot be canceled safely here.
+                return CancelResponse.REJECT
+            self._pending = deque(
+                task for task in self._pending if task.task_id != task_id
+            )
+        self._finish_action(
+            task_id,
+            False,
+            "",
+            "탐색 요청이 취소되었습니다",
+            canceled=True,
+        )
+        return CancelResponse.ACCEPT
+
+    def set_task_location(self, task: RobotTask, location: str) -> None:
+        with self._lock:
+            if task.task_id in self._action_locations:
+                self._action_locations[task.task_id] = location
+
+    def _publish_action_feedback(
+        self,
+        task: RobotTask,
+        step: str,
+        progress: float,
+    ) -> None:
+        with self._lock:
+            goal_handle = self._action_handles.get(task.task_id)
+        if goal_handle is None or not goal_handle.is_active:
+            return
+        feedback = Search.Feedback()
+        feedback.step = step
+        feedback.progress = float(max(0.0, min(1.0, progress)))
+        goal_handle.publish_feedback(feedback)
+
+    def _finish_action(
+        self,
+        task_id: str,
+        success: bool,
+        location: str,
+        message: str,
+        *,
+        canceled: bool = False,
+    ) -> None:
+        with self._lock:
+            goal_handle = self._action_handles.get(task_id)
+            result_future = self._action_futures.get(task_id)
+        if goal_handle is None or result_future is None or result_future.done():
+            return
+        result = Search.Result()
+        result.success = bool(success)
+        result.location = location if success else ""
+        result.message = message
+        if canceled:
+            goal_handle.canceled()
+        elif success:
+            goal_handle.succeed()
+        else:
+            goal_handle.abort()
+        result_future.set_result(result)
+
     def publish_event(
         self,
         task: Optional[RobotTask],
@@ -205,6 +333,32 @@ class StateInterface:
             )
         if extra:
             payload.update(extra)
+
+        if task and task.task_id in self._action_handles:
+            progress_by_outcome = {
+                TaskOutcome.DB_LOOKUP.value: 0.05,
+                TaskOutcome.WAITING_POSE.value: 0.20,
+                TaskOutcome.SEARCHING.value: 0.20,
+                TaskOutcome.ZONE_NOT_FOUND.value: 0.35,
+                TaskOutcome.LANDMARK_SEARCHING.value: 0.45,
+                TaskOutcome.LANDMARK_FOUND.value: 0.55,
+                TaskOutcome.LANDMARK_NOT_FOUND.value: 0.55,
+                TaskOutcome.PICK_COMPLETED.value: 1.0,
+            }
+            self._publish_action_feedback(
+                task,
+                message,
+                progress_by_outcome.get(outcome_value, 0.75),
+            )
+            if status == "completed":
+                with self._lock:
+                    location = self._action_locations.get(task.task_id, "")
+                self._finish_action(
+                    task.task_id,
+                    success,
+                    location,
+                    message,
+                )
 
         if not self.result_client.service_is_ready():
             self.result_client.wait_for_service(timeout_sec=0.2)

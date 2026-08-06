@@ -125,7 +125,7 @@ class Any6DPoseProvider:
 
     def wait_for_target(self, timeout_sec: float) -> Optional[TargetPose]:
         del timeout_sec
-        raise RuntimeError("Any6D targets must come from /any6d/detect")
+        raise RuntimeError("Any6D targets must come from /find_object_pose")
 
     def target_from_pose(
         self,

@@ -75,9 +75,10 @@ class SearchConfig:
     zone4_base_x_mm: float = -290.0
     linear_vel: float = 30.0
     linear_acc: float = 60.0
-    detection_service: str = "/any6d/detect"
+    detection_service: str = "/find_object_pose"
     detection_service_wait_timeout_sec: float = 2.0
-    detection_timeout_sec: float = 10.0
+    # DINO detection (4 s) + Any6D pose estimation (12 s) + margin.
+    detection_timeout_sec: float = 20.0
     landmark_targets: tuple[tuple[str, str], ...] = (
         ("green_box", "green_box"),
         ("gray_box", "gray_box"),
@@ -113,6 +114,7 @@ class PoseConfig:
 class InterfaceConfig:
     control_init_service: str = "/control/init"
     control_task_service: str = "/control/task"
+    control_search_action: str = "/control/search"
     state_result_service: str = "/state/robot_result"
     db_load_service: str = "/db/load"
     db_service_wait_timeout_sec: float = 2.0

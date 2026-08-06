@@ -83,6 +83,7 @@ class RobotControlNode(Node):
         self.get_logger().info(
             f"Control ready: init={interface.control_init_service}, "
             f"request={interface.control_task_service}, "
+            f"search_action={interface.control_search_action}, "
             f"result={interface.state_result_service}"
         )
 
@@ -155,6 +156,7 @@ class RobotControlNode(Node):
             db_payload = db_result.to_payload()
             if db_result.location_known and db_result.item is not None:
                 location = str(db_result.item.get("location", ""))
+                self.state.set_task_location(task, location)
                 self.get_logger().info(
                     f"Task {task.task_id}: DB location='{location}'"
                 )
@@ -289,6 +291,7 @@ class RobotControlNode(Node):
                     extra={"db": db_payload, "search_zone": zone},
                 )
             else:
+                self.state.set_task_location(task, f"search_zone_{zone}")
                 return target
 
             self._observe_landmark(task, zone, db_payload)
@@ -385,7 +388,8 @@ class RobotControlNode(Node):
         """
         interface = self.config.interface
         self.get_logger().info(
-            f"Waiting for state-node tasks on {interface.control_task_service}"
+            f"Waiting for state-node tasks on {interface.control_task_service} "
+            f"or {interface.control_search_action}"
         )
         if self.config.pose.input_mode == "any6d":
             self.get_logger().info(
