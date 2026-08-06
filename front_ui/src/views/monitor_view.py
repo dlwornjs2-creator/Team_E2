@@ -63,15 +63,16 @@ def stage_row(label: str, state: str):
 
 class MonitorView:
     def __init__(self):
-        # 카메라 프레임 갱신 관리
+        # 마지막으로 표시한 카메라 프레임 ID
         self.last_frame_id = None
+
+        # 마지막으로 화면을 갱신한 시각
         self.last_frame_update = 0.0
 
-        # Flet 화면에서는 약 5 FPS로 표시
-        self.frame_update_interval = 0.2
+        # 최대 30FPS로 화면 갱신
+        self.frame_update_interval = 1.0 / 30.0
 
-        # 부모 영역이 정확히 4:3이므로 FILL을 사용해도
-        # 화면이 찌그러지거나 잘리지 않는다.
+        # RealSense 컬러 영상
         self.camera_image = ft.Image(
             src="",
             fit=ft.BoxFit.FILL,
@@ -79,30 +80,35 @@ class MonitorView:
             visible=False,
         )
 
+        # 카메라 연결 전 표시 문구
         self.camera_message = ft.Text(
             "카메라 연결 없음",
             size=t.SIZE_BODY,
             color=t.TEXT_FAINT,
         )
 
+        # 검출 결과 표시
         self.detection_text = ft.Text(
             "검출 결과 없음",
             size=t.SIZE_BODY,
             color=t.TEXT_DIM,
         )
 
+        # 현재 행동
         self.action_text = ft.Text(
             "-",
             size=t.SIZE_VALUE,
             color=t.TEXT,
         )
 
+        # 행동 이유
         self.reason_text = ft.Text(
             "-",
             size=t.SIZE_BODY,
             color=t.TEXT_DIM,
         )
 
+        # 작업 단계
         self.stage_column = ft.Column(
             spacing=7,
             scroll=ft.ScrollMode.AUTO,
@@ -112,6 +118,7 @@ class MonitorView:
             ],
         )
 
+        # 작업 정보
         self.task_id_text = ft.Text("-", color=t.TEXT)
         self.target_text = ft.Text("-", color=t.TEXT)
         self.voice_text = ft.Text("-", color=t.TEXT)
@@ -120,12 +127,16 @@ class MonitorView:
         self.zone_text = ft.Text("-", color=t.TEXT)
 
         # GitHub 기존 3D 지도 기능 유지
-        self._map_view = MapView(width=480, height=280, show_robot=True)
+        self._map_view = MapView(
+            width=480,
+            height=280,
+            show_robot=True,
+        )
 
         self.control = self._build()
 
     def _build(self):
-        # 640 × 480 영상과 동일한 4:3 비율
+        # 640×480 영상과 동일한 4:3 비율
         camera_view = ft.Container(
             aspect_ratio=4 / 3,
             bgcolor="#0A0D12",
@@ -134,10 +145,9 @@ class MonitorView:
             content=ft.Stack(
                 fit=ft.StackFit.EXPAND,
                 controls=[
-                    # Stack 영역 전체를 이미지가 채움
                     self.camera_image,
 
-                    # 카메라가 없을 때만 중앙 문구 표시
+                    # 카메라가 연결되지 않았을 때만 표시
                     ft.Container(
                         alignment=ft.Alignment.CENTER,
                         content=self.camera_message,
@@ -150,7 +160,9 @@ class MonitorView:
             "현재 카메라 화면",
             content=ft.Column(
                 spacing=8,
-                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                horizontal_alignment=(
+                    ft.CrossAxisAlignment.CENTER
+                ),
                 controls=[
                     camera_view,
                     self.detection_text,
@@ -350,10 +362,11 @@ class MonitorView:
         system = snapshot.get("system", {})
         task = snapshot.get("task", {})
 
-        # GitHub 기존 MapView 실데이터 연결 유지
+        # GitHub 기존 MapView 데이터 갱신 유지
         zones = snapshot.get("zones", [])
         objects = snapshot.get("objects", [])
         robot = snapshot.get("robot") or {}
+
         self._map_view.update(
             zones,
             task.get("current_zone"),
@@ -361,10 +374,12 @@ class MonitorView:
             robot.get("links"),
         )
 
+        # 카메라 상태
         camera_connected = system.get(
             "camera_connected",
             False,
         )
+
         frame_id = snapshot.get("frame_id")
 
         if camera_connected and frame_id is not None:
@@ -372,11 +387,14 @@ class MonitorView:
 
             should_update = (
                 frame_id != self.last_frame_id
-                and now - self.last_frame_update
-                >= self.frame_update_interval
+                and (
+                    now - self.last_frame_update
+                    >= self.frame_update_interval
+                )
             )
 
             if should_update:
+                # frame_id를 URL에 추가해 캐시 방지
                 self.camera_image.src = (
                     f"{cfg.BASE_URL}"
                     f"{cfg.FRAME_PATH}"
@@ -396,6 +414,7 @@ class MonitorView:
                 "카메라 연결 없음"
             )
 
+        # 검출 결과 표시
         detections = task.get("detections", [])
 
         if detections:
@@ -407,6 +426,7 @@ class MonitorView:
 
                 if confidence is None:
                     detection_labels.append(label)
+
                 else:
                     detection_labels.append(
                         f"{label}  "
@@ -423,6 +443,7 @@ class MonitorView:
                 "찾지 못했습니다."
             )
 
+        # 행동과 이유
         self.action_text.value = (
             task.get("action") or "-"
         )
@@ -431,6 +452,7 @@ class MonitorView:
             task.get("action_reason") or "-"
         )
 
+        # 현재 작업 단계
         current_stage = task.get(
             "stage",
             "idle",
@@ -445,6 +467,7 @@ class MonitorView:
             current_index = stage_codes.index(
                 current_stage
             )
+
         except ValueError:
             current_index = 0
 
@@ -467,6 +490,7 @@ class MonitorView:
                 )
             )
 
+        # 작업 정보
         self.task_id_text.value = (
             task.get("task_id") or "-"
         )
