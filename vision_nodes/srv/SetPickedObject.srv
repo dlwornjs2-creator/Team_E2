@@ -1,0 +1,5 @@
+# 픽업 완료된 고정 클래스명
+string model_name
+---
+bool success
+string message
