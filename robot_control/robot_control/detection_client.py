@@ -8,7 +8,7 @@ from typing import Any, Optional
 
 import rclpy
 from geometry_msgs.msg import PoseStamped
-from interfaces.srv import DetectObject
+from interfaces.srv import DetectObject, UpdateTcpPose
 from rclpy.node import Node
 
 from .config import SearchConfig
@@ -22,6 +22,10 @@ class DetectionClient:
         self.node = node
         self.config = config
         self.client = node.create_client(DetectObject, config.detection_service)
+        self.tcp_pose_client = node.create_client(
+            UpdateTcpPose,
+            config.tcp_pose_service,
+        )
         self._sequence = 0
 
     @property
@@ -36,7 +40,19 @@ class DetectionClient:
         *,
         request_kind: str = "target",
         candidates: tuple[tuple[str, str], ...] = (),
+        base_tcp_posx: Optional[list[float]] = None,
     ) -> DetectionResult:
+        if base_tcp_posx is None or len(base_tcp_posx) != 6:
+            self.node.get_logger().error(
+                "A six-element current TCP pose is required before detection"
+            )
+            return DetectionResult(False, None)
+
+        suffix = "" if request_kind == "target" else f":{request_kind}"
+        request_id = f"{task.task_id}:zone-{zone}{suffix}"
+        if not self._send_tcp_pose(request_id, base_tcp_posx):
+            return DetectionResult(False, None)
+
         if not self.client.wait_for_service(
             timeout_sec=self.config.detection_service_wait_timeout_sec
         ):
@@ -45,8 +61,6 @@ class DetectionClient:
             )
             return DetectionResult(False, None)
 
-        suffix = "" if request_kind == "target" else f":{request_kind}"
-        request_id = f"{task.task_id}:zone-{zone}{suffix}"
         object_name = task.class_label or task.name
         payload: dict[str, Any] = {
             "request_id": request_id,
@@ -96,6 +110,53 @@ class DetectionClient:
             self.node.get_logger().warning(f"Any6D detection failed: {message}")
             return DetectionResult(False, None)
         return self._parse_response(response.response, request_id)
+
+    def _send_tcp_pose(
+        self,
+        request_id: str,
+        base_tcp_posx: list[float],
+    ) -> bool:
+        if not self.tcp_pose_client.wait_for_service(
+            timeout_sec=self.config.tcp_pose_service_wait_timeout_sec
+        ):
+            self.node.get_logger().warning(
+                f"TCP pose service unavailable: {self.config.tcp_pose_service}"
+            )
+            return False
+
+        request = UpdateTcpPose.Request()
+        request.tcp_pose = [float(value) for value in base_tcp_posx]
+        future = self.tcp_pose_client.call_async(request)
+        deadline = time.monotonic() + self.config.tcp_pose_response_timeout_sec
+        while rclpy.ok() and not future.done() and time.monotonic() < deadline:
+            remaining = deadline - time.monotonic()
+            rclpy.spin_once(
+                self.node,
+                timeout_sec=min(0.1, max(0.0, remaining)),
+            )
+
+        if not future.done():
+            future.cancel()
+            self.node.get_logger().warning(
+                f"TCP pose service timeout: request_id={request_id}"
+            )
+            return False
+        if future.exception() is not None:
+            self.node.get_logger().error(
+                f"TCP pose service failed: {future.exception()}"
+            )
+            return False
+        response = future.result()
+        if response is None or not response.success:
+            message = response.message if response else "empty response"
+            self.node.get_logger().warning(
+                f"Detector rejected current TCP pose: {message}"
+            )
+            return False
+        self.node.get_logger().info(
+            f"Sent current TCP pose to detector: pose={base_tcp_posx}"
+        )
+        return True
 
     def _parse_response(self, raw: str, request_id: str) -> DetectionResult:
         try:

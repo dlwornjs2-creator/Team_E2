@@ -135,7 +135,22 @@ DB 조회 결과에 유효한 `location`이 없으면 다음 네 구역을 순�
 3. 조인트 `(6, 55, 43, -91, 96, 186)`
 4. 3구역에서 Base X 방향 `-290 mm`
 
-각 구역에 도착한 뒤 제어 노드는 Any6D 실행 노드의 서비스를 호출합니다.
+각 구역에 도착한 뒤 제어 노드는 현재 TCP 자세를 먼저 탐지노드에 전달하고,
+TCP 등록이 성공하면 Any6D 탐지 서비스를 호출합니다.
+
+```text
+/update_robot_tcp_pose (interfaces/srv/UpdateTcpPose)
+```
+
+TCP 전달 요청 필드:
+
+```text
+tcp_pose: [X, Y, Z, A, B, C]
+```
+
+`X/Y/Z` 단위는 mm, `A/B/C` 단위는 degree이며 Doosan ZYZ 자세입니다.
+탐지노드는 `success=true`로 응답해야 합니다. 서비스가 없거나 실패 또는 2초
+타임아웃이 발생하면 제어 노드는 그 요청의 `/find_object_pose`를 호출하지 않습니다.
 
 ```text
 /find_object_pose (interfaces/srv/DetectObject)
@@ -167,7 +182,7 @@ JSON을 반환합니다. pose가 같은 응답에 포함되므로 별도 pose �
   "pose": {
     "frame_id": "camera_color_optical_frame",
     "stamp": {"sec": 0, "nanosec": 0},
-    "position": {"x": 367.289, "y": 8.193, "z": 35.476},
+    "position": {"x": 0.367289, "y": 0.008193, "z": 0.035476},
     "orientation": {"x": -0.9999971, "y": -0.0024120, "z": -0.0000005, "w": 0.0000681}
   }
 }
@@ -179,7 +194,7 @@ JSON을 반환합니다. pose가 같은 응답에 포함되므로 별도 pose �
 {"request_id":"pick-001:zone-2","detected":false}
 ```
 
-제어 노드는 서비스 응답을 기본 10초 기다립니다. 응답 또는 유효 자세가 없으면
+제어 노드는 서비스 응답을 기본 20초 기다립니다. 응답 또는 유효 자세가 없으면
 다음 구역으로 이동합니다. 네 구역 모두 실패하면 홈으로 돌아갑니다.
 
 요청한 물체를 해당 구역에서 찾지 못했거나 유효한 pose를 받지 못하면, 다음

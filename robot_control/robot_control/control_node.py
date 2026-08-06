@@ -304,10 +304,14 @@ class RobotControlNode(Node):
         task: RobotTask,
         zone: int,
     ) -> Optional[TargetPose]:
+        if self.motion is None:
+            raise RuntimeError("Motion executor is not initialized")
+        base_tcp_posx = self.motion.current_tcp_posx()
         result = self.detector.request_detection(
             task,
             zone,
             self.config.search.detection_timeout_sec,
+            base_tcp_posx=base_tcp_posx,
         )
         if not result.detected:
             return None
@@ -316,9 +320,6 @@ class RobotControlNode(Node):
                 f"Zone {zone}: detector reported found without a pose"
             )
             return None
-        if self.motion is None:
-            raise RuntimeError("Motion executor is not initialized")
-        base_tcp_posx = self.motion.current_tcp_posx()
         self.get_logger().info(
             f"Converting Any6D camera pose with current TCP: {base_tcp_posx}"
         )
@@ -355,6 +356,11 @@ class RobotControlNode(Node):
             self.config.search.detection_timeout_sec,
             request_kind="landmark",
             candidates=candidates,
+            base_tcp_posx=(
+                self.motion.current_tcp_posx()
+                if self.motion is not None
+                else None
+            ),
         )
         if not result.detected:
             self.state.publish_event(

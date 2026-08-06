@@ -31,6 +31,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/DbSave.srv"
   "srv/DbLoad.srv"
   "srv/DetectObject.srv"
+  "srv/UpdateTcpPose.srv"
   "srv/RobotResult.srv"
 )
 ament_export_dependencies(rosidl_default_runtime)

@@ -76,7 +76,10 @@ class SearchConfig:
     linear_vel: float = 30.0
     linear_acc: float = 60.0
     detection_service: str = "/find_object_pose"
+    tcp_pose_service: str = "/update_robot_tcp_pose"
     detection_service_wait_timeout_sec: float = 2.0
+    tcp_pose_service_wait_timeout_sec: float = 2.0
+    tcp_pose_response_timeout_sec: float = 2.0
     # DINO detection (4 s) + Any6D pose estimation (12 s) + margin.
     detection_timeout_sec: float = 20.0
     landmark_targets: tuple[tuple[str, str], ...] = (
