@@ -15,27 +15,13 @@ from client.state_client import (
 )
 from views.home_view import HomeView
 from views.monitor_view import MonitorView
-from views.log_view import build_log
-
-
-class _StaticView:
-    """snapshot을 아직 안 쓰는 화면(작업/로그)용 어댑터.
-
-    update()가 아무 것도 안 하는 것만 빼면 HomeView와 같은 모양(.control,
-    .update())이라 main.py에서 화면 종류를 안 가리고 다룰 수 있다.
-    """
-
-    def __init__(self, control: ft.Control):
-        self.control = control
-
-    def update(self, snapshot):
-        pass
+from views.log_view import LogView
 
 
 PAGES = [
     ("홈", ft.Icons.HOME_OUTLINED, ft.Icons.HOME, HomeView),
     ("작업", ft.Icons.VISIBILITY_OUTLINED, ft.Icons.VISIBILITY, MonitorView),
-    ("로그", ft.Icons.LIST_ALT_OUTLINED, ft.Icons.LIST_ALT, lambda: _StaticView(build_log())),
+    ("로그", ft.Icons.LIST_ALT_OUTLINED, ft.Icons.LIST_ALT, LogView),
 ]
 
 

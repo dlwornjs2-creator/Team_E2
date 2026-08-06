@@ -86,6 +86,22 @@ class StateStore:
         with self._lock:
             self._snapshot["frame_id"] = int(frame_id)
 
+    def update_recent_tasks(self, recent_tasks: list[dict]):
+        """추가 기능: db의 tasks 폴링 결과로 recent_tasks 전체를 갈아끼운다.
+        (update_objects와 같은 이유로 병합하지 않고 통째로 교체한다.)"""
+        with self._lock:
+            self._snapshot["recent_tasks"] = copy.deepcopy(recent_tasks)
+
+    def update_objects(self, objects: list[dict]):
+        """추가 기능: db의 items 폴링 결과로 objects 전체를 갈아끼운다.
+
+        델타가 아니라 매번 "지금 db에 있는 전체 목록"으로 통째로 교체한다
+        — db 쪽 items가 사라진 물건은 그대로 없어져야(사라졌다는 걸 UI가
+        알아야) 하므로 이전 값과 병합하지 않는다.
+        """
+        with self._lock:
+            self._snapshot["objects"] = copy.deepcopy(objects)
+
     def get_snapshot(self) -> dict:
         """HTTP `/state`가 사용할 현재 상태 복사본을 반환한다."""
         with self._lock:

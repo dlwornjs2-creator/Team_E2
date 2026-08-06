@@ -257,13 +257,23 @@ def insert_rows(conn, table, rows):
     return results
 
 
-def select_rows(conn, table):
-    """`table`(items 제외) 전체를 dict 리스트로 돌려준다. 필터 없음.
+def select_rows(conn, table, limit=None):
+    """`table`(items 제외) 을 dict 리스트로 돌려준다. 필터 없음.
+
+    `limit`을 주면 최근 것(id 내림차순)부터 그만큼만 가져온다 — `tasks`처럼
+    계속 쌓이기만 하는 테이블을 back_ui가 1초마다 폴링하는데(2026-08-06),
+    매번 테이블 전체를 긁으면 시간이 지날수록 느려진다. front_ui는 최근
+    5건만 쓰므로(README) 여유 있게 20건 정도로 잡아서 부르면 된다.
 
     `table` 검증은 `insert_rows`와 같은 이유로 호출한 쪽 책임이다.
     """
     conn.row_factory = sqlite3.Row
-    return [dict(row) for row in conn.execute(f"SELECT * FROM {table} ORDER BY id")]
+    sql = f"SELECT * FROM {table} ORDER BY id DESC"
+    args = ()
+    if limit is not None:
+        sql += " LIMIT ?"
+        args = (limit,)
+    return [dict(row) for row in conn.execute(sql, args)]
 
 
 def clear_all(conn):
@@ -404,9 +414,13 @@ def handle_search(conn, request_json):
         response = {'count': len(rows), 'items': rows}
         return True, json.dumps(response, ensure_ascii=False), msg
 
-    # tasks — 필터 없이 테이블 전체 조회
+    # tasks — 필터 없이 최근 것 위주로 조회. 계속 쌓이기만 하는 테이블이라
+    # 전체를 매번 긁지 않는다(위 select_rows 설명 참고). front_ui 홈 화면은
+    # 앞 5건만 잘라 쓰지만(recent_tasks[:5]) 로그 화면 "작업 기록" 탭은
+    # 안 자르고 온 걸 다 보여주므로(명세 9장: 훑어보는 화면), 5보다 넉넉하게
+    # 잡는다 — 그래도 SQLite 로컬 쿼리라 100건이어도 비용은 무시할 만하다.
     try:
-        rows = select_rows(conn, table)
+        rows = select_rows(conn, table, limit=100 if table == 'tasks' else None)
     except sqlite3.Error as e:
         return False, '{}', f'조회 실패: {e}'
 
