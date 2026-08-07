@@ -5,10 +5,11 @@ from __future__ import annotations
 import time
 
 import numpy as np
+import rclpy
 from rclpy.node import Node
 
 from .config import GripperConfig, MotionConfig, RobotConfig, SearchConfig
-from .models import GripperError, TargetPose
+from .models import GripperError, PoseValidationError, TargetPose
 from .onrobot import RG
 from .pose_utils import matrix_to_drl_posx, validate_homogeneous_matrix
 
@@ -91,29 +92,47 @@ class MotionExecutor:
 
         self.busy = True
         try:
-            if zone == 1:
+            if zone in {1, 2}:
                 self.move_home()
-            elif zone == 3:
+                if zone == 2:
+                    self.dsr.movel(
+                        [
+                            self.search_config.zone2_base_x_mm,
+                            0.0,
+                            0.0,
+                            0.0,
+                            0.0,
+                            0.0,
+                        ],
+                        vel=self.search_config.linear_vel,
+                        acc=self.search_config.linear_acc,
+                        ref=getattr(self.dsr, "DR_BASE", 0),
+                        mod=getattr(self.dsr, "DR_MV_MOD_REL", 1),
+                    )
+                    self.dsr.mwait()
+            else:
                 self.dsr.movej(
                     list(self.search_config.zone3_joint),
                     vel=self.robot_config.joint_vel,
                     acc=self.robot_config.joint_acc,
                 )
                 self.dsr.mwait()
-            else:
-                offset_x = (
-                    self.search_config.zone2_base_x_mm
-                    if zone == 2
-                    else self.search_config.zone4_base_x_mm
-                )
-                self.dsr.movel(
-                    [offset_x, 0.0, 0.0, 0.0, 0.0, 0.0],
-                    vel=self.search_config.linear_vel,
-                    acc=self.search_config.linear_acc,
-                    ref=getattr(self.dsr, "DR_BASE", 0),
-                    mod=getattr(self.dsr, "DR_MV_MOD_REL", 1),
-                )
-                self.dsr.mwait()
+                if zone == 4:
+                    self.dsr.movel(
+                        [
+                            self.search_config.zone4_base_x_mm,
+                            0.0,
+                            0.0,
+                            0.0,
+                            0.0,
+                            0.0,
+                        ],
+                        vel=self.search_config.linear_vel,
+                        acc=self.search_config.linear_acc,
+                        ref=getattr(self.dsr, "DR_BASE", 0),
+                        mod=getattr(self.dsr, "DR_MV_MOD_REL", 1),
+                    )
+                    self.dsr.mwait()
         finally:
             self.busy = False
 
@@ -166,11 +185,68 @@ class MotionExecutor:
 
     def _make_lift_matrix(self, target: np.ndarray) -> np.ndarray:
         lift = target.copy()
-        lift[2, 3] += self.motion_config.lift_distance_mm
+        if self.motion_config.approach_mode == "base_z":
+            lift[2, 3] += self.motion_config.lift_distance_mm
+        else:
+            axis = np.asarray(
+                self.motion_config.tool_insertion_axis,
+                dtype=float,
+            )
+            axis /= np.linalg.norm(axis)
+            insertion_direction_base = target[:3, :3] @ axis
+            lift[:3, 3] -= (
+                insertion_direction_base
+                * self.motion_config.lift_distance_mm
+            )
         return validate_homogeneous_matrix(lift, "lift matrix")
+
+    def _select_lowest_joint_cost_target(self, target: TargetPose) -> TargetPose:
+        """Select the reachable grasp candidate with minimum joint travel."""
+        if not target.grasp_candidates or not self.robot_config.enable_motion:
+            return target
+        current = np.asarray(self.dsr.get_current_posj(), dtype=float)
+        solution_space = int(self.dsr.get_current_solution_space())
+        if current.shape != (6,) or not np.all(np.isfinite(current)):
+            raise PoseValidationError("Invalid current joint position")
+        if solution_space < 0 or solution_space > 7:
+            raise PoseValidationError(
+                f"Invalid current solution space: {solution_space}"
+            )
+
+        evaluated = []
+        dr_base = getattr(self.dsr, "DR_BASE", 0)
+        for name, matrix in target.grasp_candidates:
+            posx = matrix_to_drl_posx(matrix)
+            try:
+                joints = np.asarray(
+                    self.dsr.ikin(posx, solution_space, ref=dr_base),
+                    dtype=float,
+                )
+            except Exception as error:
+                self.node.get_logger().warning(
+                    f"IK rejected grasp candidate {name}: {error}"
+                )
+                continue
+            if joints.shape != (6,) or not np.all(np.isfinite(joints)):
+                self.node.get_logger().warning(
+                    f"IK returned invalid joints for {name}: {joints}"
+                )
+                continue
+            delta = (joints - current + 180.0) % 360.0 - 180.0
+            cost = float(np.linalg.norm(delta))
+            evaluated.append((cost, name, matrix, posx))
+
+        if not evaluated:
+            raise PoseValidationError("No reachable grasp candidate from IK")
+        cost, name, matrix, posx = min(evaluated, key=lambda item: item[0])
+        self.node.get_logger().info(
+            f"Selected grasp={name}, joint_cost={cost:.2f} deg"
+        )
+        return TargetPose(matrix, posx, target.source_sequence)
 
     def pick_and_return_home(self, target: TargetPose) -> bool:
         """Approach, grasp, lift, and return home while holding the object."""
+        target = self._select_lowest_joint_cost_target(target)
         approach_pos = matrix_to_drl_posx(
             self._make_approach_matrix(target.matrix)
         )
@@ -225,8 +301,203 @@ class MotionExecutor:
             self.dsr.mwait()
             self.move_home()
             self.node.get_logger().info(
-                "Pick completed; robot returned home while holding object"
+                "Pick completed; robot returned home while holding object. Starting force release monitoring..."
             )
+            self.wait_for_force_release()
+            return True
+        finally:
+            self.busy = False
+
+    def wait_for_force_release(self) -> bool:
+        """Monitor external torque at JHOME_POS while holding object until external force releases gripper."""
+        if not self.robot_config.enable_motion:
+            self.node.get_logger().info("Dry-run: force release monitoring skipped")
+            self.holding_object = False
+            return True
+
+        self.node.get_logger().info(
+            f"Compliance ON, waiting for external force (> {self.motion_config.force_threshold_nm} Nm)..."
+        )
+        task_compliance_ctrl = getattr(self.dsr, "task_compliance_ctrl", None)
+        release_compliance_ctrl = getattr(self.dsr, "release_compliance_ctrl", None)
+        get_external_torque = getattr(self.dsr, "get_external_torque", None)
+
+        if task_compliance_ctrl is not None:
+            task_compliance_ctrl(stx=list(self.motion_config.compliance_stiffness))
+
+        released = False
+        try:
+            while rclpy.ok() and self.holding_object and not released:
+                if get_external_torque is not None:
+                    ext = get_external_torque()
+                    if ext:
+                        peak = max(abs(v) for v in ext)
+                        if peak > self.motion_config.force_threshold_nm:
+                            self.node.get_logger().info(
+                                f"External force detected: {peak:.2f} Nm -> Opening gripper and returning to ready state"
+                            )
+                            self.gripper.open_gripper(
+                                force_val=self.gripper_config.force_tenth_newton
+                            )
+                            self._wait_for_gripper(require_grip=False)
+                            self.holding_object = False
+                            released = True
+                            break
+                time.sleep(0.05)
+        finally:
+            if release_compliance_ctrl is not None:
+                release_compliance_ctrl()
+
+        if released:
+            self.move_home()
+            self.node.get_logger().info("Force release completed; robot in ready state.")
+        return released
+
+    def open_green_box(self, landmark: TargetPose) -> bool:
+        """Pick the green-box lid handle, place the lid aside, and return above it."""
+        landmark = self._select_lowest_joint_cost_target(landmark)
+        grasp = landmark.matrix.copy()
+        grasp[2, 3] += self.search_config.green_box_grasp_z_offset_mm
+        grasp = validate_homogeneous_matrix(grasp, "green box lid grasp")
+
+        approach = grasp.copy()
+        approach[2, 3] += self.motion_config.approach_distance_mm
+        lifted = grasp.copy()
+        lifted[2, 3] += self.search_config.green_box_lift_z_mm
+        shifted = lifted.copy()
+        shifted[1, 3] += self.search_config.green_box_place_y_mm
+        lowered = shifted.copy()
+        lowered[2, 3] -= self.search_config.green_box_place_down_z_mm
+
+        approach_pos = matrix_to_drl_posx(approach)
+        grasp_pos = matrix_to_drl_posx(grasp)
+        lifted_pos = matrix_to_drl_posx(lifted)
+        shifted_pos = matrix_to_drl_posx(shifted)
+        lowered_pos = matrix_to_drl_posx(lowered)
+        self.node.get_logger().info(f"green box handle posx: {grasp_pos}")
+        self.node.get_logger().info(f"green box lid lifted posx: {lifted_pos}")
+        self.node.get_logger().info(f"green box lid place posx: {lowered_pos}")
+
+        if not self.robot_config.enable_motion:
+            self.node.get_logger().warning("Dry-run: green box opening skipped")
+            return False
+
+        self.busy = True
+        try:
+            dr_base = getattr(self.dsr, "DR_BASE", 0)
+            dr_abs = getattr(self.dsr, "DR_MV_MOD_ABS", 0)
+
+            def move_linear(pos, vel, acc):
+                self.dsr.movel(pos, vel=vel, acc=acc, ref=dr_base, mod=dr_abs)
+                self.dsr.mwait()
+
+            move_linear(
+                approach_pos,
+                self.motion_config.approach_vel,
+                self.motion_config.approach_acc,
+            )
+            move_linear(
+                grasp_pos,
+                self.motion_config.grasp_vel,
+                self.motion_config.grasp_acc,
+            )
+            self.gripper.close_gripper(
+                force_val=self.gripper_config.force_tenth_newton
+            )
+            self._wait_for_gripper(require_grip=True)
+            self.holding_object = True
+
+            move_linear(
+                lifted_pos,
+                self.motion_config.lift_vel,
+                self.motion_config.lift_acc,
+            )
+            move_linear(
+                shifted_pos,
+                self.motion_config.lift_vel,
+                self.motion_config.lift_acc,
+            )
+            move_linear(
+                lowered_pos,
+                self.motion_config.grasp_vel,
+                self.motion_config.grasp_acc,
+            )
+            self.gripper.open_gripper(
+                force_val=self.gripper_config.force_tenth_newton
+            )
+            self._wait_for_gripper(require_grip=False)
+            self.holding_object = False
+
+            # Retrace the placement path to the pose where the lid was lifted.
+            move_linear(
+                shifted_pos,
+                self.motion_config.lift_vel,
+                self.motion_config.lift_acc,
+            )
+            move_linear(
+                lifted_pos,
+                self.motion_config.lift_vel,
+                self.motion_config.lift_acc,
+            )
+            return True
+        finally:
+            self.busy = False
+
+    def open_gray_box(self, landmark: TargetPose) -> bool:
+        """Grasp the gray-box handle, pull it in Base +Y, and release it."""
+        landmark = self._select_lowest_joint_cost_target(landmark)
+        grasp = landmark.matrix.copy()
+        grasp[1, 3] += self.search_config.gray_box_handle_y_offset_mm
+        grasp = validate_homogeneous_matrix(grasp, "gray box handle grasp")
+        approach = grasp.copy()
+        approach[2, 3] += self.motion_config.approach_distance_mm
+        opened = grasp.copy()
+        opened[1, 3] += self.search_config.gray_box_open_y_mm
+
+        approach_pos = matrix_to_drl_posx(approach)
+        grasp_pos = matrix_to_drl_posx(grasp)
+        opened_pos = matrix_to_drl_posx(opened)
+        self.node.get_logger().info(f"gray box handle posx: {grasp_pos}")
+        self.node.get_logger().info(f"gray box opened posx: {opened_pos}")
+
+        if not self.robot_config.enable_motion:
+            self.node.get_logger().warning("Dry-run: gray box opening skipped")
+            return False
+
+        self.busy = True
+        try:
+            dr_base = getattr(self.dsr, "DR_BASE", 0)
+            dr_abs = getattr(self.dsr, "DR_MV_MOD_ABS", 0)
+
+            def move_linear(pos, vel, acc):
+                self.dsr.movel(pos, vel=vel, acc=acc, ref=dr_base, mod=dr_abs)
+                self.dsr.mwait()
+
+            move_linear(
+                approach_pos,
+                self.motion_config.approach_vel,
+                self.motion_config.approach_acc,
+            )
+            move_linear(
+                grasp_pos,
+                self.motion_config.grasp_vel,
+                self.motion_config.grasp_acc,
+            )
+            self.gripper.close_gripper(
+                force_val=self.gripper_config.force_tenth_newton
+            )
+            self._wait_for_gripper(require_grip=True)
+            self.holding_object = True
+            move_linear(
+                opened_pos,
+                self.motion_config.lift_vel,
+                self.motion_config.lift_acc,
+            )
+            self.gripper.open_gripper(
+                force_val=self.gripper_config.force_tenth_newton
+            )
+            self._wait_for_gripper(require_grip=False)
+            self.holding_object = False
             return True
         finally:
             self.busy = False

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from typing import Any, Optional
 
 import rclpy
@@ -270,6 +269,8 @@ class RobotControlNode(Node):
         if self.motion is None:
             raise RuntimeError("로봇 하드웨어가 초기화되지 않았습니다")
 
+        green_box_opened = False
+        gray_box_opened = False
         for zone in range(1, 5):
             self.state.publish_event(
                 task,
@@ -294,7 +295,21 @@ class RobotControlNode(Node):
                 self.state.set_task_location(task, f"search_zone_{zone}")
                 return target
 
-            self._observe_landmark(task, zone, db_payload)
+            target_after_open, green_opened_now, gray_opened_now = (
+                self._observe_landmark(
+                    task,
+                    zone,
+                    db_payload,
+                    search_green=not green_box_opened,
+                    search_gray=not gray_box_opened,
+                )
+            )
+            green_box_opened = green_box_opened or green_opened_now
+            gray_box_opened = gray_box_opened or gray_opened_now
+            if target_after_open is not None:
+                box_name = "gray_box" if gray_opened_now else "green_box"
+                self.state.set_task_location(task, f"{box_name}_zone_{zone}")
+                return target_after_open
 
         self.motion.move_home()
         return None
@@ -334,55 +349,131 @@ class RobotControlNode(Node):
         task: RobotTask,
         zone: int,
         db_payload: dict[str, Any],
-    ) -> None:
-        """Look for configured landmarks after the requested target is absent."""
-        candidates = self.config.search.landmark_targets
-        candidate_names = [name for name, _ in candidates]
+        *,
+        search_green: bool,
+        search_gray: bool,
+    ) -> tuple[Optional[TargetPose], bool, bool]:
+        """Open a detected green box, retry the target, then check gray box."""
+        if self.motion is None:
+            raise RuntimeError("Motion executor is not initialized")
+        green_box_opened = False
+        if search_green:
+            self.state.publish_event(
+                task,
+                status="running",
+                success=True,
+                outcome=TaskOutcome.LANDMARK_SEARCHING,
+                message="green_box를 탐지합니다",
+                extra={
+                    "db": db_payload,
+                    "search_zone": zone,
+                    "landmark_candidates": ["green_box"],
+                },
+            )
+            green_tcp = self.motion.current_tcp_posx()
+            green_result = self.detector.request_detection(
+                task,
+                zone,
+                self.config.search.detection_timeout_sec,
+                request_kind="landmark",
+                candidates=(("green_box", "green_box"),),
+                base_tcp_posx=green_tcp,
+            )
+            if green_result.detected and green_result.pose is not None:
+                green_target = self.pose_provider.target_from_pose(
+                    green_result.pose,
+                    self.detector.sequence,
+                    green_tcp,
+                )
+                self.state.publish_event(
+                    task,
+                    status="running",
+                    success=True,
+                    outcome=TaskOutcome.LANDMARK_FOUND,
+                    message="green_box 덮개를 엽니다",
+                    extra={"db": db_payload, "search_zone": zone},
+                )
+                green_box_opened = self.motion.open_green_box(green_target)
+                if green_box_opened:
+                    self.state.publish_event(
+                        task,
+                        status="running",
+                        success=True,
+                        outcome=TaskOutcome.WAITING_POSE,
+                        message="green_box를 연 뒤 요청 물체를 다시 탐지합니다",
+                        extra={"db": db_payload, "search_zone": zone},
+                    )
+                    target = self._request_target_detection(task, zone)
+                    if target is not None:
+                        return target, True, False
+
+        if not search_gray:
+            return None, green_box_opened, False
+
         self.state.publish_event(
             task,
             status="running",
             success=True,
             outcome=TaskOutcome.LANDMARK_SEARCHING,
-            message="green_box 또는 gray_box를 탐지합니다",
+            message="요청 물체가 없어 gray_box를 탐지합니다",
             extra={
                 "db": db_payload,
                 "search_zone": zone,
-                "landmark_candidates": candidate_names,
+                "landmark_candidates": ["gray_box"],
             },
         )
-        result = self.detector.request_detection(
+        gray_tcp = self.motion.current_tcp_posx()
+        gray_result = self.detector.request_detection(
             task,
             zone,
             self.config.search.detection_timeout_sec,
             request_kind="landmark",
-            candidates=candidates,
-            base_tcp_posx=(
-                self.motion.current_tcp_posx()
-                if self.motion is not None
-                else None
-            ),
+            candidates=(("gray_box", "gray_box"),),
+            base_tcp_posx=gray_tcp,
         )
-        if not result.detected:
+        gray_box_opened = False
+        if gray_result.detected and gray_result.pose is not None:
+            gray_target = self.pose_provider.target_from_pose(
+                gray_result.pose,
+                self.detector.sequence,
+                gray_tcp,
+            )
             self.state.publish_event(
                 task,
                 status="running",
                 success=True,
-                outcome=TaskOutcome.LANDMARK_NOT_FOUND,
-                message="랜드마크를 찾지 못해 다음 탐색구역으로 이동합니다",
+                outcome=TaskOutcome.LANDMARK_FOUND,
+                message="gray_box 손잡이를 잡고 상자를 엽니다",
                 extra={"db": db_payload, "search_zone": zone},
             )
-            return
+            gray_box_opened = self.motion.open_gray_box(gray_target)
+            if gray_box_opened:
+                self.state.publish_event(
+                    task,
+                    status="running",
+                    success=True,
+                    outcome=TaskOutcome.WAITING_POSE,
+                    message="gray_box를 연 뒤 요청 물체를 다시 탐지합니다",
+                    extra={"db": db_payload, "search_zone": zone},
+                )
+                target = self._request_target_detection(task, zone)
+                if target is not None:
+                    return target, green_box_opened, True
 
-        dwell_sec = self.config.search.landmark_dwell_sec
+        message = (
+            "gray_box 내부에서 요청 물체를 찾지 못해 다음 탐색구역으로 이동합니다"
+            if gray_box_opened
+            else "gray_box를 찾지 못했거나 유효한 pose가 없습니다"
+        )
         self.state.publish_event(
             task,
             status="running",
             success=True,
-            outcome=TaskOutcome.LANDMARK_FOUND,
-            message=f"랜드마크를 찾아 {dwell_sec:.1f}초 대기합니다",
+            outcome=TaskOutcome.LANDMARK_NOT_FOUND,
+            message=message,
             extra={"db": db_payload, "search_zone": zone},
         )
-        time.sleep(dwell_sec)
+        return None, green_box_opened, gray_box_opened
 
     def run(self) -> None:
         """

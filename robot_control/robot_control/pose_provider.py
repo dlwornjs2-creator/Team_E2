@@ -14,6 +14,7 @@ from .config import PoseConfig
 from .camera_transform import CameraToBaseTransformer
 from .models import PoseValidationError, TargetPose
 from .pose_utils import (
+    compute_optimal_grasp_matrix,
     drl_posx_to_matrix,
     matrix_to_drl_posx,
     pose_stamped_to_matrix,
@@ -160,9 +161,13 @@ class Any6DPoseProvider:
                 f"Object Z={base_object[2, 3]:.2f}mm is below "
                 f"{self.config.min_depth_mm:.2f}mm"
             )
-        base_grasp = validate_homogeneous_matrix(
-            base_object @ self._object_to_grasp,
-            "T_base_grasp",
+        base_grasp, mode, grasp_candidates = compute_optimal_grasp_matrix(
+            base_object,
+            base_tcp_posx,
+        )
+        self.node.get_logger().info(
+            f"Selected {mode} grasp mode at object origin "
+            f"({base_grasp[0, 3]:.1f}, {base_grasp[1, 3]:.1f}, {base_grasp[2, 3]:.1f})"
         )
         if base_grasp[2, 3] < self.config.min_depth_mm:
             raise PoseValidationError(
@@ -173,6 +178,7 @@ class Any6DPoseProvider:
             base_grasp,
             matrix_to_drl_posx(base_grasp),
             sequence,
+            grasp_candidates,
         )
 
 

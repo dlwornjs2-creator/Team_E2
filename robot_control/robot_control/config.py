@@ -48,8 +48,17 @@ class MotionConfig:
     lift_acc: float = 40.0
     approach_distance_mm: float = 50.0
     lift_distance_mm: float = 50.0
-    approach_mode: str = "base_z"
+    approach_mode: str = "tool_z"
     tool_insertion_axis: tuple[float, float, float] = (0.0, 0.0, 1.0)
+    force_threshold_nm: float = 5.0
+    compliance_stiffness: tuple[float, ...] = (
+        500.0,
+        500.0,
+        500.0,
+        100.0,
+        100.0,
+        100.0,
+    )
 
 
 @dataclass(frozen=True)
@@ -66,11 +75,11 @@ class SearchConfig:
     zone2_base_x_mm: float = 250.0
     zone3_joint: tuple[float, ...] = (
         6.0,
-        55.0,
-        43.0,
-        -91.0,
-        96.0,
-        186.0,
+        56.9,
+        47.3,
+        -90.4,
+        96.1,
+        192.2,
     )
     zone4_base_x_mm: float = -290.0
     linear_vel: float = 30.0
@@ -87,6 +96,12 @@ class SearchConfig:
         ("gray_box", "gray_box"),
     )
     landmark_dwell_sec: float = 3.0
+    green_box_grasp_z_offset_mm: float = 35.0
+    green_box_lift_z_mm: float = 150.0
+    green_box_place_y_mm: float = 200.0
+    green_box_place_down_z_mm: float = 185.0
+    gray_box_handle_y_offset_mm: float = 105.0
+    gray_box_open_y_mm: float = 155.0
 
 
 @dataclass(frozen=True)

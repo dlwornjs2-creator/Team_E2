@@ -44,6 +44,7 @@ class TargetPose:
     matrix: np.ndarray
     posx: list[float]
     source_sequence: int
+    grasp_candidates: tuple[tuple[str, np.ndarray], ...] = ()
 
 
 @dataclass(frozen=True)
