@@ -361,48 +361,47 @@ class FindObjectServer(Node):
             })
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
-    def _forward_picked_object(self, model_name: str) -> tuple[bool, str]:
-        """받은 class_label을 all_detection의 SetPickedObject 서비스로 전달합니다."""
-        if not self.picked_client.wait_for_service(
-            timeout_sec=self.args.picked_service_wait_sec
-        ):
-            return (
-                False,
-                f"picked service unavailable: {self.args.picked_service}",
+    def _notify_picked_object(self, model_name: str) -> bool:
+        """all_object에 선택 클래스를 비동기로 알립니다.
+
+        이 알림의 성공/실패는 제어의 /find_object_pose 응답에 영향을 주지 않습니다.
+        all_object 노드가 없더라도 Any6D 검출과 카메라 기준 pose 반환은 계속됩니다.
+        """
+        if not self.picked_client.service_is_ready():
+            self.get_logger().warning(
+                f"all_object 알림 생략: 서비스 없음 {self.args.picked_service}; "
+                "제어 pose 처리는 정상 계속합니다."
             )
+            return False
 
         request = SetPickedObject.Request()
         request.model_name = model_name
         future = self.picked_client.call_async(request)
-        completed = threading.Event()
-        result_holder: dict[str, object] = {}
 
         def _done(done_future) -> None:
             try:
-                result_holder["response"] = done_future.result()
+                result = done_future.result()
             except Exception as exc:
-                result_holder["error"] = exc
-            finally:
-                completed.set()
+                self.get_logger().warning(
+                    f"all_object 알림 호출 실패: class={model_name}; {exc}"
+                )
+                return
+
+            if result is None:
+                self.get_logger().warning(
+                    f"all_object 알림 응답 없음: class={model_name}"
+                )
+            elif bool(result.success):
+                self.get_logger().info(
+                    f"all_object 알림 성공: class={model_name}; {result.message}"
+                )
+            else:
+                self.get_logger().warning(
+                    f"all_object 알림 거절: class={model_name}; {result.message}"
+                )
 
         future.add_done_callback(_done)
-        if not completed.wait(timeout=self.args.picked_response_timeout_sec):
-            return (
-                False,
-                f"picked service response timeout: {self.args.picked_service}",
-            )
-
-        error = result_holder.get("error")
-        if error is not None:
-            return False, f"picked service call failed: {error}"
-
-        result = result_holder.get("response")
-        if result is None:
-            return False, "picked service returned no response"
-        if not bool(result.success):
-            return False, str(result.message)
-
-        return True, str(result.message)
+        return True
 
     def _find_object_cb(self, request, response):
         response.success = False
@@ -427,21 +426,6 @@ class FindObjectServer(Node):
         try:
             self.get_logger().info(
                 f"request_id={request_id}, class_label={requested_model}"
-            )
-
-            # 제어 노드에서 받은 class_label을 all_detection 노드에 먼저 전달합니다.
-            # all_detection은 이후 /detect_all_objects 응답에서 이 클래스를 제외합니다.
-            forwarded, forward_message = self._forward_picked_object(requested_model)
-            if not forwarded:
-                response.message = (
-                    f"failed to forward picked class {requested_model}: "
-                    f"{forward_message}"
-                )
-                self.get_logger().error(response.message)
-                return response
-            self.get_logger().info(
-                f"forwarded picked class to all_detection: "
-                f"{requested_model}; {forward_message}"
             )
 
             selected = self._find_best_detection(
@@ -496,6 +480,10 @@ class FindObjectServer(Node):
                 f"detected={profile.model_name}; frame=camera_color_optical_frame; "
                 f"confidence={detection.confidence:.3f}; fallback_box={used_fallback}"
             )
+
+            # 실제로 pose가 계산된 객체만 all_object에 알립니다.
+            # 알림은 비동기이며 실패해도 제어 응답은 그대로 성공입니다.
+            self._notify_picked_object(profile.model_name)
 
             output = Path(self.args.output).expanduser()
             output.parent.mkdir(parents=True, exist_ok=True)
@@ -884,13 +872,13 @@ def main() -> int:
         "--picked-service-wait-sec",
         type=float,
         default=3.0,
-        help="/set_picked_object 서버 발견 대기 시간(초)",
+        help="호환성 유지용 옵션(현재 비동기 알림에서는 사용하지 않음)",
     )
     parser.add_argument(
         "--picked-response-timeout-sec",
         type=float,
-        default=3.0,
-        help="/set_picked_object 응답 대기 시간(초)",
+        default=30.0,
+        help="호환성 유지용 옵션(현재 비동기 알림에서는 사용하지 않음)",
     )
     parser.add_argument("--any6d-root", default="~/Any6D")
     parser.add_argument("--output", default=None,
@@ -941,7 +929,7 @@ def main() -> int:
     parser.add_argument("--text-threshold", type=float, default=0.25)
     parser.add_argument("--iou", type=float, default=0.55)
     parser.add_argument("--imgsz", type=int, default=800)
-    args = parser.parse_args()
+    args, unknown = parser.parse_known_args()
 
     root = Path(args.any6d_root).expanduser().resolve()
     profiles = build_profiles(args)

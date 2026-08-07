@@ -9,7 +9,6 @@ find_package(ament_cmake REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(rclpy REQUIRED)
 find_package(sensor_msgs REQUIRED)
-find_package(geometry_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(interfaces REQUIRED)
 
@@ -29,11 +28,9 @@ install(PROGRAMS
   RENAME dino_all_object_node
 )
 
-install(DIRECTORY code/
-  DESTINATION share/${PROJECT_NAME}/code
-)
-
-install(FILES README.md
+install(DIRECTORY
+  launch
+  config
   DESTINATION share/${PROJECT_NAME}
 )
 
